@@ -1,0 +1,39 @@
+# Secrets
+.env
+*.env
+!.env.example
+*.htpasswd
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+
+# Node / Vite
+node_modules/
+dist/
+.vite/
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Runtime state (deploy scripts preserve these on the VM, but they
+# should never live in the template repo)
+repo/
+data/
+*.db
+*.sqlite
+*.sqlite3
+
+# Logs + backups
+*.log
+*.bak
+*.bak.*

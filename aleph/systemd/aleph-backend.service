@@ -1,0 +1,24 @@
+[Unit]
+Description=Aleph backend (semantic memory viewer)
+After=network.target postgresql.service
+Wants=postgresql.service
+
+[Service]
+Type=simple
+User=www-data
+WorkingDirectory=/opt/aleph
+EnvironmentFile=/opt/aleph/.env
+ExecStart=/opt/aleph/.venv/bin/uvicorn backend.main:app --host 127.0.0.1 --port 8765 --proxy-headers --forwarded-allow-ips=127.0.0.1
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+# Reasonable hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ReadWritePaths=/opt/aleph/data
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

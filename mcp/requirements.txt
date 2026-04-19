@@ -1,0 +1,16 @@
+fastmcp>=2.3.0
+python-dotenv>=1.0.0
+uvicorn>=0.30.0
+starlette>=0.37.0
+PyMySQL>=1.1.0
+markdownify>=0.11.6
+beautifulsoup4>=4.12.0
+psycopg[binary]>=3.2
+psycopg-pool>=3.2
+pgvector>=0.3
+google-genai>=0.3
+tenacity>=8.2
+# dev
+pytest>=8
+pytest-asyncio>=0.23
+pytest-postgresql>=6

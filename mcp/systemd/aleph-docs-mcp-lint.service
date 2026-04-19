@@ -1,0 +1,10 @@
+[Unit]
+Description=MCP Aleph Docs memory lint (oneshot)
+After=network.target
+
+[Service]
+Type=oneshot
+User=www-data
+WorkingDirectory=/opt/mcp
+EnvironmentFile=/opt/mcp/.env
+ExecStart=/opt/mcp/.venv/bin/python -m memory.lint_cli --mode auto

@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Aleph — sign in</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    font-family: 'IBM Plex Sans', system-ui, sans-serif;
+    color: oklch(0.95 0.01 270);
+  }
+  .mono { font-family: 'IBM Plex Mono', monospace; }
+
+  .login-screen {
+    position: fixed; inset: 0;
+    display: grid; place-items: center;
+    background: radial-gradient(ellipse at 50% 40%,
+      oklch(0.18 0.05 280) 0%,
+      oklch(0.08 0.02 265) 55%,
+      oklch(0.05 0.01 260) 100%);
+    overflow: hidden;
+  }
+  .login-bg { position: absolute; inset: 0; pointer-events: none; }
+  .login-orb {
+    position: absolute;
+    top: 50%; left: 50%;
+    width: 640px; height: 640px;
+    transform: translate(-50%, -50%);
+    border-radius: 50%;
+    background: radial-gradient(circle at 35% 30%,
+      oklch(0.7 0.22 290 / 0.55),
+      oklch(0.5 0.22 270 / 0.25) 40%,
+      transparent 70%);
+    filter: blur(30px);
+    animation: orb-pulse 8s ease-in-out infinite;
+  }
+  @keyframes orb-pulse {
+    0%, 100% { transform: translate(-50%, -50%) scale(1);   opacity: 0.9; }
+    50%      { transform: translate(-50%, -50%) scale(1.1); opacity: 1;   }
+  }
+  .login-grid {
+    position: absolute; inset: 0;
+    background-image:
+      linear-gradient(oklch(0.6 0.1 280 / 0.06) 1px, transparent 1px),
+      linear-gradient(90deg, oklch(0.6 0.1 280 / 0.06) 1px, transparent 1px);
+    background-size: 48px 48px;
+    mask-image: radial-gradient(ellipse at center, black 40%, transparent 80%);
+    -webkit-mask-image: radial-gradient(ellipse at center, black 40%, transparent 80%);
+  }
+
+  .login-card {
+    position: relative;
+    width: min(420px, 92vw);
+    padding: 36px 34px 26px;
+    background: oklch(0.12 0.02 265 / 0.78);
+    backdrop-filter: blur(24px) saturate(1.3);
+    -webkit-backdrop-filter: blur(24px) saturate(1.3);
+    border: 1px solid oklch(0.4 0.05 270 / 0.35);
+    border-radius: 16px;
+    box-shadow:
+      0 30px 80px oklch(0 0 0 / 0.55),
+      inset 0 1px 0 oklch(1 0 0 / 0.06);
+    display: flex; flex-direction: column; gap: 18px;
+    animation: login-in 0.5s cubic-bezier(0.2, 0.8, 0.2, 1);
+  }
+  @keyframes login-in {
+    from { opacity: 0; transform: translateY(8px) scale(0.98); }
+    to   { opacity: 1; transform: none; }
+  }
+
+  .login-brand {
+    display: flex; align-items: center; gap: 14px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid oklch(0.3 0.03 270 / 0.4);
+  }
+  .brand-dot {
+    width: 34px; height: 34px;
+    border-radius: 50%;
+    background: radial-gradient(circle at 30% 30%,
+      oklch(0.9 0.2 85),
+      oklch(0.55 0.22 300) 60%,
+      oklch(0.3 0.15 280) 100%);
+    box-shadow: 0 0 24px oklch(0.6 0.2 285 / 0.6);
+    flex-shrink: 0;
+  }
+  .login-title {
+    font-size: 24px; font-weight: 600;
+    letter-spacing: 0.02em;
+    color: oklch(0.98 0.01 270);
+  }
+  .login-sub {
+    font-size: 11px;
+    color: oklch(0.6 0.03 270);
+    letter-spacing: 0.08em;
+  }
+
+  .login-field { display: flex; flex-direction: column; gap: 6px; }
+  .login-field label {
+    font-size: 11px;
+    color: oklch(0.55 0.03 270);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+  }
+  .login-field input {
+    padding: 11px 14px;
+    background: oklch(0.08 0.01 265 / 0.7);
+    border: 1px solid oklch(0.3 0.03 270 / 0.5);
+    border-radius: 8px;
+    color: oklch(0.95 0.01 270);
+    font: inherit;
+    font-size: 14px;
+    outline: none;
+    transition: border-color 0.15s, box-shadow 0.15s;
+  }
+  .login-field input:focus {
+    border-color: oklch(0.6 0.2 285);
+    box-shadow: 0 0 0 3px oklch(0.6 0.2 285 / 0.18);
+  }
+
+  .login-error {
+    font-size: 12px;
+    color: oklch(0.7 0.2 25);
+    background: oklch(0.2 0.1 25 / 0.25);
+    border: 1px solid oklch(0.4 0.15 25 / 0.4);
+    border-radius: 6px;
+    padding: 8px 12px;
+    display: none;
+  }
+  .login-error.show { display: block; }
+
+  .login-submit {
+    margin-top: 4px;
+    padding: 13px 16px;
+    font: inherit; font-size: 14px;
+    letter-spacing: 0.02em;
+    border-radius: 8px;
+    background: linear-gradient(to bottom, oklch(0.65 0.22 285), oklch(0.55 0.22 280));
+    border: 1px solid oklch(0.7 0.15 285 / 0.5);
+    color: white;
+    box-shadow:
+      0 8px 24px oklch(0.5 0.2 285 / 0.4),
+      inset 0 1px 0 oklch(1 0 0 / 0.2);
+    cursor: pointer;
+    transition: transform 0.1s, box-shadow 0.15s;
+  }
+  .login-submit:hover:not(:disabled) {
+    transform: translateY(-1px);
+    box-shadow:
+      0 12px 30px oklch(0.5 0.2 285 / 0.55),
+      inset 0 1px 0 oklch(1 0 0 / 0.25);
+  }
+  .login-submit:disabled { opacity: 0.6; cursor: wait; }
+
+  .login-foot {
+    display: flex; justify-content: space-between; align-items: center;
+    font-size: 11px;
+    color: oklch(0.55 0.03 270);
+    padding-top: 8px;
+    border-top: 1px solid oklch(0.3 0.03 270 / 0.3);
+  }
+  .login-foot a {
+    color: oklch(0.75 0.15 285);
+    text-decoration: none;
+    transition: color 0.1s;
+  }
+  .login-foot a:hover { color: oklch(0.9 0.18 290); }
+
+  .login-advanced {
+    font-size: 11px;
+    color: oklch(0.55 0.03 270);
+    cursor: pointer;
+    user-select: none;
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
+  }
+  .login-advanced:hover { color: oklch(0.75 0.03 270); }
+  .advanced-fields { display: none; flex-direction: column; gap: 12px; }
+  .advanced-fields.show { display: flex; }
+  .advanced-hint {
+    font-size: 10px;
+    color: oklch(0.55 0.03 270);
+    font-family: 'IBM Plex Mono', monospace;
+    line-height: 1.45;
+  }
+</style>
+</head>
+<body>
+
+<div class="login-screen">
+  <div class="login-bg">
+    <div class="login-orb"></div>
+    <div class="login-grid"></div>
+  </div>
+
+  <form class="login-card" id="loginForm" autocomplete="on">
+    <div class="login-brand">
+      <div class="brand-dot"></div>
+      <div>
+        <div class="login-title">Aleph</div>
+        <div class="login-sub mono">semantic memory · aleph-docs-mcp</div>
+      </div>
+    </div>
+
+    <div class="login-field">
+      <label class="mono" for="username">username</label>
+      <input type="text" id="username" name="username" autocomplete="username"
+             value="alberto" spellcheck="false" autofocus required />
+    </div>
+
+    <div class="login-field">
+      <label class="mono" for="password">password</label>
+      <input type="password" id="password" name="password"
+             autocomplete="current-password" placeholder="•••••••••" required />
+    </div>
+
+    <div class="login-advanced" id="toggleAdvanced">+ advanced (write key)</div>
+    <div class="advanced-fields" id="advancedFields">
+      <div class="login-field">
+        <label class="mono" for="writekey">aleph api key <span style="text-transform:none;opacity:0.6">(optional — only for remember / forget)</span></label>
+        <input type="password" id="writekey" name="writekey" autocomplete="off"
+               placeholder="X-Aleph-Key" />
+      </div>
+      <div class="advanced-hint">
+        Leave empty if you only need read-only access (graph, search, node detail).
+        Written to localStorage as <span class="mono">aleph.write_key</span>.
+      </div>
+    </div>
+
+    <div class="login-error mono" id="error">credentials required</div>
+
+    <button class="login-submit" type="submit" id="submit">enter vector space</button>
+
+    <div class="login-foot mono">
+      <span>aleph v0.1 · aleph-docs-mcp</span>
+      <a href="#" id="clear">clear stored session</a>
+    </div>
+  </form>
+</div>
+
+<script>
+  const form    = document.getElementById('loginForm');
+  const error   = document.getElementById('error');
+  const submit  = document.getElementById('submit');
+  const clearLn = document.getElementById('clear');
+  const toggle  = document.getElementById('toggleAdvanced');
+  const adv     = document.getElementById('advancedFields');
+
+  const BASIC_KEY = 'aleph.basic_auth';
+  const WRITE_KEY = 'aleph.write_key';
+
+  toggle.addEventListener('click', () => {
+    adv.classList.toggle('show');
+    toggle.textContent = adv.classList.contains('show') ? '− advanced (write key)' : '+ advanced (write key)';
+  });
+
+  clearLn.addEventListener('click', (e) => {
+    e.preventDefault();
+    try {
+      localStorage.removeItem(BASIC_KEY);
+      localStorage.removeItem(WRITE_KEY);
+    } catch { /* ignore */ }
+    error.textContent = 'stored session cleared';
+    error.classList.add('show');
+    error.style.color = 'oklch(0.75 0.15 285)';
+  });
+
+  // If already authenticated, bounce to main app (but let the user override with ?force=1).
+  try {
+    const existing = localStorage.getItem(BASIC_KEY);
+    const params = new URLSearchParams(window.location.search);
+    if (existing && !params.has('force')) {
+      window.location.replace('./');
+    }
+  } catch { /* ignore */ }
+
+  function showError(msg) {
+    error.textContent = msg;
+    error.style.color = 'oklch(0.7 0.2 25)';
+    error.classList.add('show');
+  }
+
+  async function authenticate(username, password) {
+    const b64 = btoa(unescape(encodeURIComponent(username + ':' + password)));
+    const res = await fetch('/aleph/api/health', {
+      headers: { Authorization: 'Basic ' + b64, Accept: 'application/json' },
+    });
+    if (res.status === 200) return { ok: true, b64 };
+    if (res.status === 401) return { ok: false, reason: 'invalid credentials' };
+    return { ok: false, reason: 'server error (' + res.status + ')' };
+  }
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const username = form.username.value.trim();
+    const password = form.password.value;
+    const writekey = form.writekey.value.trim();
+    if (!username || !password) {
+      showError('credentials required');
+      return;
+    }
+    error.classList.remove('show');
+    submit.disabled = true;
+    submit.textContent = 'authenticating…';
+    try {
+      const res = await authenticate(username, password);
+      if (res.ok) {
+        try {
+          localStorage.setItem(BASIC_KEY, res.b64);
+          if (writekey) localStorage.setItem(WRITE_KEY, writekey);
+          else localStorage.removeItem(WRITE_KEY);
+        } catch { /* ignore */ }
+        // Prime the browser's Basic-Auth cache with one more request so
+        // EventSource (which can't set custom headers) inherits creds.
+        await fetch('/aleph/api/graph?version=0', {
+          headers: { Authorization: 'Basic ' + res.b64 },
+          credentials: 'include',
+        }).catch(() => { /* non-fatal */ });
+        window.location.replace('./');
+      } else {
+        showError(res.reason || 'authentication failed');
+      }
+    } catch (err) {
+      showError('network error — ' + (err?.message || 'unknown'));
+    } finally {
+      submit.disabled = false;
+      submit.textContent = 'enter vector space';
+    }
+  });
+</script>
+</body>
+</html>

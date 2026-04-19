@@ -1,0 +1,12 @@
+[Unit]
+Description=Aleph UMAP projection rebuild
+After=postgresql.service aleph-backend.service
+
+[Service]
+Type=oneshot
+User=www-data
+WorkingDirectory=/opt/aleph
+EnvironmentFile=/opt/aleph/.env
+ExecStart=/opt/aleph/.venv/bin/python -m backend.projection
+StandardOutput=journal
+StandardError=journal

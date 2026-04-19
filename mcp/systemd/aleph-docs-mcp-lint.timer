@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Aleph Docs memory lint every 6h
+
+[Timer]
+OnBootSec=15min
+OnUnitActiveSec=6h
+Persistent=true
+Unit=aleph-docs-mcp-lint.service
+
+[Install]
+WantedBy=timers.target

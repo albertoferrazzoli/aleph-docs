@@ -1,0 +1,11 @@
+[Unit]
+Description=Run Aleph projection hourly
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1h
+Unit=aleph-projection.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target
