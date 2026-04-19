@@ -35,18 +35,27 @@ unified multimodal memory, **without regressing the existing text path**.
 ### 2.1 Goals
 
 - **G1**: Embed images, short videos, short audio clips, and PDF pages with
-  `gemini-embedding-2-preview`, storing them in the same `memories` table
-  as doc chunks.
-- **G2**: Route discovery: the indexer walks a `content/` tree containing
-  mixed modalities and dispatches each file to the right chunker.
-- **G3**: Unified retrieval: `semantic_search(query, kind?)` returns hits
-  across modalities, ranked by the same `similarity × Ebbinghaus-decay`
-  formula.
-- **G4**: The Aleph viewer renders each `kind` appropriately: text, image,
+  a multimodal model, storing them in the same `memories` table as doc
+  chunks — **but only when the operator opts in**. Text-only deployments
+  must be able to run with a cheaper (or local, offline) embedder and pay
+  nothing extra for a feature they don't use.
+- **G2**: **Embedding backend is selectable at deploy time via env**.
+  Supported out of the box: `gemini-001` (text, cheapest cloud default),
+  `gemini-2-preview` (multimodal), and `local` (free / offline /
+  air-gapped via Ollama or sentence-transformers). Adding a fourth
+  backend is a single module, no core changes.
+- **G3**: Route discovery: the indexer walks a `content/` tree containing
+  mixed modalities and dispatches each file to the right chunker. If the
+  active backend is text-only, non-text files are skipped with a
+  structured warning (not an error).
+- **G4**: Unified retrieval: `semantic_search(query, kind?)` returns hits
+  across whatever modalities are populated in the current DB, ranked by
+  the same `similarity × Ebbinghaus-decay` formula.
+- **G5**: The Aleph viewer renders each `kind` appropriately: text, image,
   video (with frame seek), audio (with waveform + player), PDF page link.
-- **G5**: Zero regression on the existing text path — the migration is
-  opt-in via env vars and a one-shot re-bootstrap.
-- **G6**: Cost and latency envelopes documented and bounded.
+- **G6**: Zero regression on the existing text path — switching backends
+  is opt-in via env vars and a one-shot re-bootstrap.
+- **G7**: Cost and latency envelopes documented and bounded **per backend**.
 
 ### 2.2 Non-goals
 
@@ -78,12 +87,15 @@ unified multimodal memory, **without regressing the existing text path**.
 | F10 | The indexer in local mode walks `.md`, `.mdx`, `.png`, `.jpg`, `.jpeg`, `.webp`, `.mp4`, `.mov`, `.mp3`, `.wav`, `.pdf` under the docs root. Extension → chunker routing is table-driven and easy to extend. |
 | F11 | Audit rows continue to include a content snapshot; for media, the snapshot is the `content` field (caption or transcript excerpt), not the raw bytes. |
 | F12 | Lint checks `orphan` / `redundant` / `stale` keep working per kind. The `contradiction` LLM judge is updated to accept multimodal pairs (images included) by passing the `media_ref` blobs to the judge model. |
+| F13 | The embedder is a **pluggable backend**: one env var (`EMBED_BACKEND`) selects among `gemini-001` (default, cheapest, text-only), `gemini-2-preview` (multimodal), `local` (Ollama / sentence-transformers, offline). Adding a new backend = one ~80-line module registered in a dict. |
+| F14 | Each backend declares its supported modalities and native output dim. The indexer enforces this: if the active backend doesn't support a modality, files of that kind are skipped with a `[indexer] warning: backend '...' does not support kind 'image', skipped`. |
+| F15 | `EMBED_DIM` env is the single source of truth for the pgvector column width. Switching backends with a different native dim requires a one-shot `memory.bootstrap --reembed-all` (documented). |
 
 ---
 
 ## 4. Non-functional requirements
 
-- **N1** — **Backward compatibility**: unchanged `EMBED_MODEL` env keeps the current behaviour. Upgrading is opt-in.
+- **N1** — **Backward compatibility**: unchanged `EMBED_BACKEND=gemini-001` keeps the current behaviour for text-only deployments. Upgrading to multimodal is opt-in.
 - **N2** — **Schema stability**: new columns are `ADD COLUMN IF NOT EXISTS` on `memories`. No re-embedding of existing rows is required for mixed-mode operation (though recommended for best cross-modal retrieval).
 - **N3** — **Cost envelope**: per-request embedding at 1536-d is similar to v1 for text; video/audio requests are billed per second of content. Document an estimated cost per 1000 files per modality (see §12).
 - **N4** — **Latency**: `remember_media` returns within 10s for a 50MB video or 120s audio clip. Images and PDF pages: < 3s.
@@ -95,25 +107,112 @@ unified multimodal memory, **without regressing the existing text path**.
 
 ## 5. Architecture
 
+### 5.0 Embedding backend selection (the central design decision)
+
+The embedder is a **registry of pluggable backends**. One env var picks
+the active backend at process start, and the rest of the stack is
+agnostic to which one is running.
+
+```
+EMBED_BACKEND=gemini-001        # default, cheapest cloud, text-only
+EMBED_BACKEND=gemini-2-preview  # multimodal, pay-per-modality
+EMBED_BACKEND=local             # offline via Ollama or sentence-transformers
+```
+
+Each backend is an `async` module under `mcp/memory/embedders/` exposing a
+uniform interface:
+
+```python
+# mcp/memory/embedders/base.py
+class Backend(Protocol):
+    name: str                             # "gemini-001" etc.
+    native_dim: int                       # 1536 / 3072 / 1024 / ...
+    modalities: frozenset[str]            # {"text"} | {"text","image","video","audio","pdf"}
+    price_estimate_usd_per_1k: dict[str, float]  # per-modality hint for docs
+
+    async def embed(self, items: list, out_dim: int) -> list[list[float]]:
+        """items: list of str | Part | Path. Returns out_dim-dimensional vectors."""
+```
+
+`memory/embeddings.py` becomes a thin wrapper that:
+1. Reads `EMBED_BACKEND` + `EMBED_DIM` from env.
+2. Imports the matching module once at startup.
+3. Forwards `embed_batch(...)` to it, passing `out_dim=EMBED_DIM`.
+4. Guards: if `out_dim` exceeds the backend's `native_dim`, fails fast
+   with a clear error before any tokens are spent.
+
+The rest of the stack (`chunker*`, `store`, `indexer`, viewer) depends
+only on the interface, never on a specific backend.
+
+#### Supported backends at launch
+
+| Backend ID | Modalities | Native dim | Cost | When to pick it |
+|---|---|---|---|---|
+| `gemini-001` *(default)* | text | 1536 (MRL) | **~\$0.075 / 1M input tokens** | Text-only docs, cloud-friendly, cheapest paid option. |
+| `gemini-2-preview` | text + image + video + audio + pdf | 1536 / 3072 (MRL) | Pending — expected 1-2× v1 for text, per-second billing for media | You actually need multimodal. |
+| `local` | text (plus image if using CLIP) | 1024 (BGE-M3) / 768 (Nomic) | **\$0 recurring**, one-off compute on your GPU/CPU | Offline / air-gapped / privacy-first / cost-zero. Ships with two sub-drivers: `local-bge-m3` (Ollama) and `local-nomic-embed` (Ollama). |
+
+Adding a fourth — e.g. `openai-3-small` or `voyage-3-lite` — is a single
+~80-line module. The registry is keyed by string, so `EMBED_BACKEND` is
+future-proof.
+
+#### Deployment decision tree
+
+```
+Do you have ONLY text docs and want the cheapest cloud option?
+    → EMBED_BACKEND=gemini-001   (default, do nothing)
+
+Do you have text + images/video/audio/pdf to index?
+    → EMBED_BACKEND=gemini-2-preview
+    → Set EMBED_DIM=1536 (keep schema) or 3072 (higher recall, more storage)
+
+Do you need offline / air-gapped / cost-zero?
+    → Install Ollama + pull bge-m3
+    → EMBED_BACKEND=local   EMBED_DIM=1024
+    → Accept: text-only (images via optional CLIP sub-driver, follow-up PR)
+```
+
+#### Switching backends post-deploy
+
+Backends produce incompatible vector spaces. Switching requires:
+
+```bash
+# 1. Change EMBED_BACKEND + EMBED_DIM in .env
+# 2. On the VM:
+CONFIRM_REEMBED=yes /opt/aleph-docs/mcp/.venv/bin/python \
+    -m memory.bootstrap --reembed-all
+# 3. pgvector HNSW index rebuilds incrementally as rows are UPSERTed.
+```
+
+Cost of re-bootstrap is documented per backend in §12. Interactions and
+insights accumulated in the old space are re-embedded from their stored
+`content` text (no data loss).
+
 ### 5.1 New / modified modules
 
 ```
 mcp/
 ├── memory/
-│   ├── embeddings.py       (M)  ← accepts Part-like contents, model switchable
-│   ├── chunker.py          (M)  ← unchanged for markdown
-│   ├── chunker_media.py    (N)  ← image / video / audio / pdf chunkers
-│   ├── media.py            (N)  ← ffmpeg wrappers + thumbnail helpers
-│   ├── schema.sql          (M)  ← ADD COLUMN media_ref / media_type / preview_b64
-│   └── bootstrap.py        (M)  ← walks multi-ext, dispatches
-├── indexer.py              (M)  ← extension table driven
-└── tools/memory.py         (M)  ← new tool remember_media(path, context?)
+│   ├── embeddings.py       (M)   ← thin wrapper: reads EMBED_BACKEND, forwards
+│   ├── embedders/          (N)   ← the backend registry
+│   │   ├── __init__.py     (N)   ← get_backend(name) -> Backend
+│   │   ├── base.py         (N)   ← Backend protocol + BackendError
+│   │   ├── gemini_001.py   (N)   ← text-only, current default
+│   │   ├── gemini_2.py     (N)   ← multimodal (preview)
+│   │   └── local.py        (N)   ← Ollama / sentence-transformers
+│   ├── chunker.py          (M)   ← unchanged for markdown
+│   ├── chunker_media.py    (N)   ← image / video / audio / pdf chunkers
+│   ├── media.py            (N)   ← ffmpeg wrappers + thumbnail helpers
+│   ├── schema.sql          (M)   ← ADD COLUMN media_ref / media_type / preview_b64
+│   └── bootstrap.py        (M)   ← walks multi-ext, skips kinds the backend does not support
+├── indexer.py              (M)   ← extension table driven, modality-aware dispatch
+└── tools/memory.py         (M)   ← new tools remember_media(path, context?), media_info(id)
 aleph/
 ├── backend/
-│   └── main.py             (M)  ← serve /media/{id} for full-res fetch
+│   └── main.py             (M)   ← serve /media/{id} for full-res fetch
 └── frontend/src/
-    ├── UI.jsx              (M)  ← modality-aware right-panel renderer
-    └── Scene.jsx           (~)  ← optional: COLOR BY media_type
+    ├── UI.jsx              (M)   ← modality-aware right-panel renderer
+    └── Scene.jsx           (~)   ← optional: COLOR BY media_type
 ```
 
 ### 5.2 Schema additions (idempotent)
@@ -259,13 +358,18 @@ rollback requires either:
 
 | Phase | Scope | Duration |
 |---|---|---|
-| 0 | Feature branch + refactor `embeddings.py` for heterogeneous inputs. Unit tests with mocked SDK. | 0.5 day |
-| 1 | Schema additions + image chunker + `remember_media` tool + viewer image renderer. Dogfood on 10 screenshots. | 1 day |
+| 0 | **Backend registry**. Refactor `embeddings.py` → `embedders/` package with `gemini-001` + `gemini-2-preview` + `local` drivers. Zero behaviour change for existing users (default stays `gemini-001`). Unit tests with mocked SDK. | 1 day |
+| 1 | Schema additions + image chunker + `remember_media` tool + viewer image renderer. Dogfood on 10 screenshots with `gemini-2-preview`. | 1 day |
 | 2 | Video chunker + audio chunker + ffmpeg dependency + deploy script update. Dogfood on 5 videos + 5 audio clips. | 1 day |
 | 3 | PDF chunker + batch tuning. End-to-end with a mixed docs corpus in `./docs/`. | 0.5 day |
 | 4 | Full re-bootstrap of text with v2 + `semantic_search` regression tests. | 0.5 day |
 
-Total wall time: ~3.5 engineer-days.
+Total wall time: ~4 engineer-days.
+
+**Ship discipline**: Phase 0 is independently valuable and can merge to
+`main` even if Phases 1–4 are not started. After Phase 0, operators who
+only care about text cost optimisation can already switch to `local`
+(Ollama) and pay zero embedding cost.
 
 ---
 
@@ -321,23 +425,56 @@ Unit tests must cover:
 
 ---
 
-## 12. Cost model (pending pricing confirmation)
+## 12. Cost model (per backend)
 
-Assumes v2 pricing is within 2x of v1 (\$0.075/1M input tokens for 001).
-Update this section when official pricing publishes.
+Costs are **bootstrap-only** (one-off embedding of the corpus) plus
+negligible incremental write costs. No recurring cost for retrieval.
 
-| Workload | Unit | Est. cost |
+### 12.1 `gemini-001` (text-only, default)
+
+| Workload | Unit | Cost |
 |---|---|---|
-| Text chunk (avg 500 tokens) | per 1000 chunks | \$0.04–\$0.08 |
+| Text chunk (~500 tokens avg) | per 1 000 chunks | **\$0.04** |
+| Non-text files | — | *not supported — skipped with warning* |
+
+Example: 10 000 text chunks → **~\$0.40 one-off**. Retrieval is free.
+
+### 12.2 `gemini-2-preview` (multimodal, pending official pricing)
+
+Assumes v2 text pricing within 1–2× v1. Media prices are estimates based
+on Google's current multimodal embedder on Vertex; **update when v2 GA
+pricing publishes**.
+
+| Workload | Unit | Estimated cost |
+|---|---|---|
+| Text chunk (~500 tokens) | per 1 000 | \$0.04–\$0.08 |
 | Image | per image | \$0.0003–\$0.0008 |
 | Video segment (60s) | per minute | \$0.001–\$0.003 |
 | Audio segment (60s) | per minute | \$0.0005–\$0.0015 |
 | PDF page | per page | \$0.0003–\$0.0006 |
 
-Example corpus cost:
-- 1000 text chunks + 500 screenshots + 50 videos (10 min avg) + 20 audio
+Example mixed corpus:
+- 1 000 text chunks + 500 screenshots + 50 videos (10 min avg) + 20 audio
   (30 min avg) + 30 PDFs (20 pages avg) ≈ **\$2–\$6 one-off bootstrap**.
-- Incremental writes (`remember` / `remember_media`): negligible in practice.
+
+### 12.3 `local` (Ollama / sentence-transformers)
+
+| Workload | Cost |
+|---|---|
+| Any modality supported by the driver | **\$0 recurring** |
+| Bootstrap compute | 1–30 min on a laptop CPU for ~10k chunks; seconds on a GPU |
+| One-off: Ollama install + model pull | ~2 GB disk for `bge-m3`; ~500 MB for `nomic-embed-text` |
+
+Best for: privacy-sensitive deployments, cost-sensitive teams, offline
+or air-gapped environments. Trade-offs vs cloud: longer bootstrap on
+CPU, quality slightly below state-of-the-art on multilingual corpora.
+
+### 12.4 Re-bootstrap cost (switching backends)
+
+Cost = bootstrap cost of the new backend, applied to all existing
+`memories` rows. `interaction` + `insight` rows are re-embedded from
+their stored `content`; no data is lost. HNSW index rebuilds
+incrementally.
 
 ---
 
