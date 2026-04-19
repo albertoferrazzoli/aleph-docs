@@ -1,0 +1,107 @@
+# Aleph Docs — one-command Docker stack.
+#
+# Usage:
+#   1. cp .env.docker.example .env
+#   2. Edit .env — at minimum set GOOGLE_API_KEY (for embeddings).
+#   3. Put your .md / .pdf / .png / .mp4 / .wav files under ./docs/ .
+#   4. docker compose up --build
+#   5. Open the viewer at  http://localhost:8765/
+#   6. Point Claude Desktop at http://localhost:8001/mcp  with
+#      `Authorization: Bearer ${MCP_API_KEY}`
+#
+# Services:
+#   db     : PostgreSQL 16 + pgvector (persistent volume)
+#   mcp    : MCP server (doc indexer + semantic memory) on :8001
+#   aleph  : FastAPI backend + bundled frontend on :8765
+#
+# Everything is local-only by default — add your own reverse proxy / TLS
+# / auth in front when going public.
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${PG_DB:-aleph_memory}
+      POSTGRES_USER: ${PG_USER:-aleph}
+      POSTGRES_PASSWORD: ${PG_PASSWORD:-aleph_dev_password_change_me}
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "${PG_USER:-aleph}", "-d", "${PG_DB:-aleph_memory}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  mcp:
+    build:
+      context: .
+      target: mcp
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "${MCP_PORT:-8001}:8001"
+    environment:
+      # Postgres
+      PG_DSN: postgresql://${PG_USER:-aleph}:${PG_PASSWORD:-aleph_dev_password_change_me}@db:5432/${PG_DB:-aleph_memory}
+      MEMORY_ENABLED: "true"
+      # MCP server
+      MCP_API_KEY: "${MCP_API_KEY:?set MCP_API_KEY in .env - generate with openssl rand -hex 32}"
+      MCP_HOST: 0.0.0.0
+      MCP_PORT: 8001
+      MCP_SERVER_NAME: ${MCP_SERVER_NAME:-AlephDocs}
+      # Docs source — LOCAL_DOCS_PATH maps to /docs mount below.
+      DOCS_REPO_URL: ${DOCS_REPO_URL:-}
+      DOCS_REPO_BRANCH: ${DOCS_REPO_BRANCH:-main}
+      DOCS_REPO_TOKEN: ${DOCS_REPO_TOKEN:-}
+      LOCAL_DOCS_PATH: /docs
+      CONTENT_SUBDIR: ${CONTENT_SUBDIR:-}
+      # Embedding backend selection
+      EMBED_BACKEND: ${EMBED_BACKEND:-gemini-001}
+      EMBED_DIM: ${EMBED_DIM:-1536}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      EMBED_MODEL: ${EMBED_MODEL:-}
+      OLLAMA_HOST: ${OLLAMA_HOST:-http://ollama:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-bge-m3}
+      LOCAL_EMBED_DIM: ${LOCAL_EMBED_DIM:-1024}
+      # Lint
+      LINT_MODE: ${LINT_MODE:-auto}
+      # Optional: doc-patch PR back to canonical git
+      DOCS_WRITE_TOKEN: ${DOCS_WRITE_TOKEN:-}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - ./docs:/docs:ro
+      - mcp_data:/data
+
+  aleph:
+    build:
+      context: .
+      target: aleph
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      mcp:
+        condition: service_started
+    ports:
+      - "${ALEPH_PORT:-8765}:8765"
+    environment:
+      PG_DSN: postgresql://${PG_USER:-aleph}:${PG_PASSWORD:-aleph_dev_password_change_me}@db:5432/${PG_DB:-aleph_memory}
+      MEMORY_ENABLED: "true"
+      ALEPH_API_KEY: "${ALEPH_API_KEY:?set ALEPH_API_KEY in .env - generate with openssl rand -hex 32}"
+      ALEPH_HOST: 0.0.0.0
+      ALEPH_PORT: 8765
+      MCP_PATH: /app/mcp
+      EMBED_BACKEND: ${EMBED_BACKEND:-gemini-001}
+      EMBED_DIM: ${EMBED_DIM:-1536}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      MEDIA_ROOT: /docs
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    volumes:
+      - ./docs:/docs:ro
+
+volumes:
+  db_data:
+  mcp_data:

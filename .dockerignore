@@ -1,0 +1,45 @@
+# Everything the Docker build context doesn't need.
+.git
+.github
+.worktrees
+.claude
+.idea
+.vscode
+
+# Python
+**/.venv
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/.pytest_cache
+**/.mypy_cache
+
+# Node / Vite
+aleph/frontend/node_modules
+aleph/frontend/dist
+aleph/frontend/.vite
+
+# Runtime state
+mcp/repo
+mcp/data
+mcp/*.db
+aleph/backend/data
+
+# Local env + docs (mounted at runtime)
+.env
+*.env
+!.env.example
+!.env.docker.example
+aleph/.env
+mcp/.env
+docs/
+
+# Editor / OS
+.DS_Store
+*.swp
+*.swo
+
+# Logs
+*.log
+*.bak
+*.bak.*

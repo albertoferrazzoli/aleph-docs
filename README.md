@@ -224,6 +224,76 @@ a remote repo at all. See [`docs/README.md`](docs/README.md).
 
 ---
 
+## Quick start with Docker (2 minutes)
+
+The fastest way to try Aleph Docs: `docker compose up`. A single command
+starts PostgreSQL + pgvector, the MCP server, and the Aleph viewer. Your
+documentation folder is mounted read-only; Claude Desktop can connect
+directly to the MCP exposed by the container.
+
+```bash
+git clone https://github.com/albertoferrazzoli/aleph-docs.git
+cd aleph-docs
+
+# 1. Configure (required: MCP_API_KEY, ALEPH_API_KEY, GOOGLE_API_KEY)
+cp .env.docker.example .env
+$EDITOR .env
+# Generate the two API-key secrets with: openssl rand -hex 32
+
+# 2. Drop your documentation into ./docs/  (.md, .pdf, .png, .mp4, .wav, …)
+#    Supported formats depend on EMBED_BACKEND (see .env comments).
+
+# 3. Start the stack
+docker compose up --build
+
+# 4. Open the viewer
+open http://localhost:8765/
+
+# 5. Point Claude Desktop at the MCP
+cat >> "$HOME/Library/Application Support/Claude/claude_desktop_config.json" <<JSON
+{
+  "mcpServers": {
+    "aleph-docs": {
+      "type": "url",
+      "url": "http://localhost:8001/mcp",
+      "headers": { "Authorization": "Bearer YOUR_MCP_API_KEY" }
+    }
+  }
+}
+JSON
+```
+
+Everything persists across restarts:
+- Postgres data → `db_data` named volume
+- MCP index + cloned repo → `mcp_data` named volume
+- Your documentation files → the bind-mounted `./docs/` directory
+
+To stop cleanly: `docker compose down`. To wipe everything:
+`docker compose down -v`.
+
+### Docker architecture
+
+```
+  ./docs/  ───►  [ mcp ]  ─┐
+                 :8001     │
+                           ├──►  [ db ]   (postgres 16 + pgvector)
+  browser  ───►  [ aleph ] ┘
+                 :8765
+
+  Claude Desktop ──► http://localhost:8001/mcp  (Bearer MCP_API_KEY)
+```
+
+- `db` uses `pgvector/pgvector:pg16` — no manual install.
+- `mcp` + `aleph` share the memory package and the docs mount.
+- `ffmpeg` pre-installed in both runtime images (video/audio chunking).
+- No Apache / reverse proxy in the container — add your own TLS/auth
+  in front if you expose beyond localhost.
+
+See [`docker-compose.yml`](docker-compose.yml) and
+[`.env.docker.example`](.env.docker.example) for every knob.
+
+---
+
 ## Quick start (local, 10 minutes)
 
 1. **Prereqs**
