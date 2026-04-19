@@ -1,6 +1,7 @@
 # Aleph Docs
 
-**A reusable template for a documentation-aware LLM knowledge system that learns from use.**
+**A reusable template for a documentation-aware LLM knowledge system that
+learns from use — across Markdown, images, video, audio and PDF.**
 
 ![Aleph viewer — 3D semantic memory graph over a real docs corpus](assets/aleph-viewer.png)
 
@@ -14,24 +15,32 @@ reinforcements and deletes live via Postgres LISTEN/NOTIFY.*
 
 ## What this is
 
-Aleph Docs turns any Markdown documentation repository into a **living
+Aleph Docs turns any documentation corpus into a **living, multimodal
 knowledge system** that an LLM (Claude, ChatGPT, local models via MCP)
 can both *read* and *write*. It gives you, out of the box:
 
-- **One MCP server** that indexes your docs repo and exposes it to any
-  LLM via the [Model Context Protocol](https://modelcontextprotocol.io/).
-  Every call to a search tool implicitly accumulates context for future
-  calls; every answer can be grounded and cited back to a line of Markdown.
+- **One MCP server** that indexes your docs and exposes them to any LLM
+  via the [Model Context Protocol](https://modelcontextprotocol.io/). It
+  understands **Markdown, images, video, audio and PDF** — all embedded
+  into one unified vector space, so a single `semantic_search("login
+  page broken")` can return a how-to page, a screenshot of the bug, a
+  screencast reproducing it, and a voice note from a customer.
+- **Pluggable embedding backends** selected at deploy time via one env
+  var. Pick `gemini-001` for cheap text-only, `gemini-2-preview` for
+  full multimodal, or `local` (Ollama) for \$0 recurring cost and full
+  offline operation. Your cost profile matches your use case.
 - **One 3D web viewer** (*Aleph*) that shows the evolving knowledge graph
   in real time — so humans can inspect, curate, and navigate the memory
-  with the same model the LLM is using.
+  with the same model the LLM is using. The viewer renders each node
+  per-modality: text preview, image thumbnail, playable video segment
+  with frame seek, audio player with waveform, PDF page link.
 - **A closed feedback loop** between the LLM interactions and the
-  canonical Markdown repo: insights captured during support sessions can
-  be promoted to pull requests on the docs repo with a single tool call.
+  canonical docs: insights captured during support sessions can be
+  promoted to pull requests on the docs repo with a single tool call.
 
-In one sentence: **git-tracked docs become queryable, writeable, and
-self-maintaining**, with costs measured in cents per year instead of
-dollars per month.
+In one sentence: **git-tracked docs, images, videos, audio and PDFs
+become queryable, writeable, and self-maintaining**, with costs measured
+in cents per year instead of dollars per month.
 
 ## What problem it solves
 
@@ -88,7 +97,8 @@ a few cents a year to maintain, and never loses the audit trail.
 | **Serendipity** (find unexpected connections) | Weak — similarity lost in prompt | Limited to explicit wikilinks | UMAP 3D projection surfaces latent clusters |
 | **Visualization** | None (vectors aren't human-readable) | Obsidian 2D graph (explicit links only) | Real-time 3D viewer with decay, live writes, audit history |
 | **Loop back to canonical docs** | None | Manual rewriting | `propose_doc_patch(open_pr=true)` opens a PR automatically |
-| **Offline / local** | Easy (any local vector DB) | Easy (any local LLM + files) | Requires Postgres + Gemini (swappable for local embeddings) |
+| **Modalities supported** | Usually text only | Text only | Text + image + video + audio + PDF (one unified vector space) |
+| **Offline / local** | Easy (any local vector DB) | Easy (any local LLM + files) | Yes — `EMBED_BACKEND=local` runs fully offline via Ollama |
 | **Predictable cost** | Low and flat | Grows with knowledge base size | Capped: SQL-free for most work, LLM budget hard-limited |
 | **Typical yearly cost** | Embedding only | $10–$100s depending on LLM usage | $0.12 bootstrap + ~$0.06/year lint |
 
@@ -129,15 +139,18 @@ a few cents a year to maintain, and never loses the audit trail.
 
 | Capability | Implementation |
 |---|---|
-| Lexical search over docs | SQLite FTS5, hourly re-indexed from a GitHub Markdown repo |
-| Semantic search (docs + insights + interactions) | pgvector HNSW with cosine + Ebbinghaus decay |
+| **Multimodal corpora** | Markdown / images / video / audio / PDF indexed side by side into one pgvector space |
+| **Pluggable embedders** | `gemini-001` / `gemini-2-preview` / `local` (Ollama) selectable via `EMBED_BACKEND` env |
+| Lexical search over docs | SQLite FTS5, hourly re-indexed from a GitHub repo or a local `./docs/` folder |
+| Semantic search (docs + insights + interactions, across modalities) | pgvector HNSW with cosine + Ebbinghaus decay |
 | Auto-reinforcement | Every hit bumps `stability × 1.7`, `access_count += 1` |
-| Manual knowledge capture | `remember(content, context)` MCP tool |
+| Manual knowledge capture | `remember(content, context)` for text, `remember_media(path)` for files |
 | Manual pruning | `forget(memory_id)` with audit snapshot preserved |
 | Audit trail | `memory_audit` table + `audit_history` MCP tool |
 | Doc-patch proposals | `suggest_doc_update`, `propose_doc_patch(open_pr=true)` opens PRs on the docs repo |
 | Quality linting | `lint_run` with 4 checks (orphan, redundant, stale, contradiction) + cost-capped LLM judge |
-| Live 3D viewer | UMAP + HDBSCAN projection, SSE patches, right-panel with audit history |
+| Live 3D viewer | UMAP + HDBSCAN projection, SSE patches, right-panel with audit history, per-modality renderers (image / video / audio / PDF) |
+| Docker-native | `docker compose up` — Postgres + MCP + viewer in one command |
 | Multi-layer auth | Apache Basic Auth on perimeter + `X-Aleph-Key` on write endpoints |
 | Idempotent deploy | `deploy-mcp.sh` and `deploy-aleph.sh` safe to re-run |
 
@@ -152,20 +165,36 @@ aleph-docs/
 ├── ARCHITECTURE.md           # design notes + diagrams
 ├── .env.example              # top-level env template (copy to .env before deploy)
 │
+├── Dockerfile                # multi-stage: frontend build → python runtime
+├── docker-compose.yml        # db + mcp + aleph, one command
+├── .env.docker.example       # docker-specific env template
+│
 ├── mcp/                      # the MCP server
 │   ├── server.py             # FastMCP app + /health + /mcp + /sse
-│   ├── indexer.py            # git clone + markdown → SQLite FTS5
+│   ├── indexer.py            # markdown + media → SQLite FTS5 + pgvector
 │   ├── auth.py               # bearer-token middleware
 │   ├── helpers.py
 │   ├── requirements.txt
 │   ├── memory/               # the semantic memory core
-│   │   ├── schema.sql        # all DDL (idempotent)
+│   │   ├── schema.sql        # all DDL (idempotent, incl. media columns)
 │   │   ├── db.py             # async psycopg pool + pgvector
-│   │   ├── embeddings.py     # Gemini client with tenacity retry
+│   │   ├── embedders/        # pluggable backend registry
+│   │   │   ├── base.py       # Backend protocol + BackendError
+│   │   │   ├── gemini_001.py # text-only, default
+│   │   │   ├── gemini_2.py   # multimodal preview
+│   │   │   └── local.py      # Ollama offline
+│   │   ├── embeddings.py     # thin shim forwarding to the active backend
 │   │   ├── chunker.py        # H2/H3-aware markdown chunking
-│   │   ├── store.py          # CRUD + forgetting-curve reinforcement
+│   │   ├── chunker_image.py  # image → 1 MediaChunk
+│   │   ├── chunker_video.py  # video → N keyframe-based scene chunks
+│   │   ├── chunker_audio.py  # audio → N overlapping window chunks
+│   │   ├── chunker_pdf.py    # pdf → 1 chunk per page
+│   │   ├── media.py          # MIME detection + thumbnailing
+│   │   ├── ffmpeg_utils.py   # ffprobe + keyframe + segmentation
+│   │   ├── types.py          # MediaChunk shared dataclass
+│   │   ├── store.py          # CRUD + forgetting-curve + upsert_media_chunk
 │   │   ├── reinforce.py      # @record_interaction decorator
-│   │   ├── bootstrap.py      # one-shot: embed all docs
+│   │   ├── bootstrap.py      # one-shot: embed all docs + media
 │   │   ├── audit.py          # best-effort write-log
 │   │   ├── doc_patch.py      # git branch+commit+PR helpers
 │   │   ├── lint.py           # quality checks
@@ -176,9 +205,9 @@ aleph-docs/
 │   │   ├── navigation.py     # list_sections, get_page_tree, list_pages
 │   │   ├── content.py        # get_page, get_page_section, get_code_blocks
 │   │   ├── meta.py           # get_doc_stats, get_changelog
-│   │   └── memory.py         # semantic_search, remember, recall, forget,
-│   │                         # audit_history, suggest_doc_update, propose_doc_patch,
-│   │                         # lint_run, lint_findings, lint_resolve
+│   │   └── memory.py         # semantic_search, remember, remember_media, recall,
+│   │                         # forget, audit_history, suggest_doc_update,
+│   │                         # propose_doc_patch, lint_run, lint_findings, lint_resolve
 │   ├── systemd/              # service + timer units (templates)
 │   ├── tests/                # pytest (pytest-postgresql)
 │   └── deploy-mcp.sh         # idempotent production deploy script
