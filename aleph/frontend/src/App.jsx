@@ -59,7 +59,10 @@ export default function App() {
   const [tweaksVisible, setTweaksVisible] = useState(false);
   const [tweaks, setTweaks] = useState(TWEAK_DEFAULTS);
   const [filters, setFilters] = useState({
-    kinds: new Set(['doc_chunk', 'interaction', 'insight']),
+    kinds: new Set([
+      'doc_chunk', 'interaction', 'insight',
+      'image', 'video_scene', 'audio_clip', 'pdf_page',
+    ]),
     minScore: 0.05,
   });
   const [colorMode, setColorMode] = useState('kind');
@@ -359,13 +362,20 @@ export default function App() {
   }, [applyPatch, pushEvent]);
 
   const stats = useMemo(() => {
-    const s = { total: 0, doc: 0, interaction: 0, insight: 0 };
+    const s = {
+      total: 0, doc: 0, interaction: 0, insight: 0,
+      image: 0, video_scene: 0, audio_clip: 0, pdf_page: 0,
+    };
     for (const n of nodes) {
       if ((n.decay ?? 1) === 0) continue;
       s.total++;
       if (n.kind === 'doc_chunk') s.doc++;
       else if (n.kind === 'interaction') s.interaction++;
       else if (n.kind === 'insight') s.insight++;
+      else if (n.kind === 'image') s.image++;
+      else if (n.kind === 'video_scene') s.video_scene++;
+      else if (n.kind === 'audio_clip') s.audio_clip++;
+      else if (n.kind === 'pdf_page') s.pdf_page++;
     }
     return s;
   }, [nodes]);

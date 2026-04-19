@@ -11,8 +11,31 @@ function fmtDaysAgo(ts) {
   return `${Math.round(d / 30)}mo ago`;
 }
 
-const KIND_SWATCH = { doc_chunk: '#7dd3fc', interaction: '#fbbf24', insight: '#f472b6' };
-const kindLabel = (k) => (k === 'doc_chunk' ? 'doc chunk' : k);
+// Seven memory kinds — keep in sync with mcp/memory/schema.sql and
+// aleph/frontend/src/Scene.jsx KIND_COLOR.
+export const KIND_SWATCH = {
+  doc_chunk:   '#7dd3fc',   // sky blue
+  interaction: '#fbbf24',   // amber
+  insight:     '#f472b6',   // pink
+  image:       '#4ade80',   // green
+  video_scene: '#fb7185',   // coral
+  audio_clip:  '#a78bfa',   // violet
+  pdf_page:    '#f97316',   // orange
+};
+export const KIND_LABELS = {
+  doc_chunk:   'doc chunk',
+  interaction: 'interaction',
+  insight:     'insight',
+  image:       'image',
+  video_scene: 'video scene',
+  audio_clip:  'audio clip',
+  pdf_page:    'pdf page',
+};
+export const KINDS_ORDER = [
+  'doc_chunk', 'interaction', 'insight',
+  'image', 'video_scene', 'audio_clip', 'pdf_page',
+];
+const kindLabel = (k) => KIND_LABELS[k] || k;
 
 export function TopBar({ onQuery, query, setQuery, stats, liveEvents, onOpenSettings }) {
   return (
@@ -42,9 +65,13 @@ export function TopBar({ onQuery, query, setQuery, stats, liveEvents, onOpenSett
 
       <div className="stats">
         <Stat label="n" value={stats.total} />
-        <Stat label="doc" value={stats.doc} dotColor="#7dd3fc" />
-        <Stat label="int" value={stats.interaction} dotColor="#fbbf24" />
-        <Stat label="ins" value={stats.insight} dotColor="#f472b6" />
+        <Stat label="doc" value={stats.doc} dotColor={KIND_SWATCH.doc_chunk} />
+        <Stat label="int" value={stats.interaction} dotColor={KIND_SWATCH.interaction} />
+        <Stat label="ins" value={stats.insight} dotColor={KIND_SWATCH.insight} />
+        <Stat label="img" value={stats.image} dotColor={KIND_SWATCH.image} />
+        <Stat label="vid" value={stats.video_scene} dotColor={KIND_SWATCH.video_scene} />
+        <Stat label="aud" value={stats.audio_clip} dotColor={KIND_SWATCH.audio_clip} />
+        <Stat label="pdf" value={stats.pdf_page} dotColor={KIND_SWATCH.pdf_page} />
         <div className="live-badge">
           <span className={'live-dot ' + (liveEvents ? 'on' : 'off')} />
           <span>stream</span>
@@ -94,7 +121,7 @@ export function LeftRail({
       </Section>
 
       <Section title="filter kind">
-        {['doc_chunk', 'interaction', 'insight'].map((k) => (
+        {KINDS_ORDER.map((k) => (
           <label key={k} className="checkbox">
             <input
               type="checkbox"
