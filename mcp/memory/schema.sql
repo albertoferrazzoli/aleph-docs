@@ -31,6 +31,21 @@ CREATE INDEX IF NOT EXISTS memories_embedding_hnsw
 CREATE INDEX IF NOT EXISTS memories_kind_idx ON memories(kind);
 CREATE INDEX IF NOT EXISTS memories_source_idx ON memories(source_path);
 
+-- Multimodal columns (PRD_MULTIMODAL §5.2). Idempotent.
+ALTER TABLE memories ADD COLUMN IF NOT EXISTS media_ref    TEXT;
+ALTER TABLE memories ADD COLUMN IF NOT EXISTS media_type   TEXT;
+ALTER TABLE memories ADD COLUMN IF NOT EXISTS preview_b64  TEXT;
+CREATE INDEX IF NOT EXISTS memories_media_type_idx ON memories(media_type);
+
+-- Extend memory_kind ENUM with multimodal values (idempotent).
+-- ADD VALUE IF NOT EXISTS requires Postgres 9.6+ and cannot run inside a
+-- transaction block, but psql executes each statement individually so this
+-- works when the schema is piped through `psql -f`.
+ALTER TYPE memory_kind ADD VALUE IF NOT EXISTS 'image';
+ALTER TYPE memory_kind ADD VALUE IF NOT EXISTS 'video_scene';
+ALTER TYPE memory_kind ADD VALUE IF NOT EXISTS 'audio_clip';
+ALTER TYPE memory_kind ADD VALUE IF NOT EXISTS 'pdf_page';
+
 CREATE UNIQUE INDEX IF NOT EXISTS memories_doc_chunk_uniq
     ON memories(source_path, source_section)
     WHERE kind = 'doc_chunk';

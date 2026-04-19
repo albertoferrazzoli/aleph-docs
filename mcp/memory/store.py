@@ -16,6 +16,8 @@ from typing import Optional
 from pgvector.psycopg import Vector
 
 from . import audit, chunker, db, embeddings
+from .embedders import get_backend
+from .types import MediaChunk
 
 log = logging.getLogger("memory")
 
@@ -346,6 +348,124 @@ async def insert_insight(
         },
     )
     return {"id": new_id}
+
+
+# ---------------------------------------------------------------------------
+# upsert_media_chunk (multimodal)
+# ---------------------------------------------------------------------------
+
+
+# Which `MediaChunk.kind` values map to which backend modality capability.
+_KIND_TO_MODALITY = {
+    "image": "image",
+    "video_scene": "video",
+    "audio_clip": "audio",
+    "pdf_page": "pdf",
+}
+
+
+async def upsert_media_chunk(
+    chunk: MediaChunk,
+    *,
+    actor: str = "mcp:remember_media",
+    context: str = "",
+    tags: list[str] | None = None,
+) -> dict:
+    """Embed + insert a single media memory row.
+
+    Validates that the active embedder backend supports the modality
+    required by `chunk.kind` BEFORE spending any tokens. If not, raises
+    RuntimeError with the active backend name — the tool layer surfaces
+    this as a structured error so callers know to switch backends.
+
+    Returns {"id": str, "kind": str, "media_type": str}.
+    """
+    if not db.is_enabled():
+        log.debug("[memory] upsert_media_chunk skipped: memory disabled")
+        raise db.MemoryDisabled(
+            "memory subsystem is disabled or not initialized"
+        )
+
+    required = _KIND_TO_MODALITY.get(chunk.kind)
+    if required is None:
+        raise RuntimeError(
+            f"upsert_media_chunk: unknown media kind {chunk.kind!r}"
+        )
+
+    # Fail fast if the current backend cannot embed this modality.
+    backend = get_backend()
+    if required not in backend.modalities:
+        raise RuntimeError(
+            f"active embedder backend {backend.name!r} does not support "
+            f"modality {required!r} (needed for kind={chunk.kind!r}). "
+            f"Supported: {sorted(backend.modalities)}. "
+            f"Set EMBED_BACKEND to a multimodal backend "
+            f"(e.g. 'gemini-2-preview')."
+        )
+
+    if chunk.path is None:
+        raise RuntimeError(
+            f"upsert_media_chunk: chunk.path is None for kind={chunk.kind!r}"
+        )
+
+    # Embed via the shared embeddings shim so tests can monkeypatch it.
+    # It forwards to the active backend with EMBED_DIM guarding.
+    vectors = await embeddings.embed_batch([chunk.path])
+    if not vectors:
+        raise RuntimeError("upsert_media_chunk: backend returned no vectors")
+    emb = vectors[0]
+
+    stability = _stability_for("insight")  # media ≈ insight for now
+    meta = dict(chunk.metadata or {})
+    if context:
+        meta["context"] = context
+    if tags:
+        meta["tags"] = list(tags)
+
+    async with db.get_conn() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "INSERT INTO memories "
+                "  (kind, content, source_path, metadata, embedding, "
+                "   stability, media_ref, media_type, preview_b64) "
+                "VALUES (%s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s) "
+                "RETURNING id",
+                (
+                    chunk.kind,
+                    chunk.content,
+                    chunk.media_ref,
+                    json.dumps(meta),
+                    _vec(emb),
+                    stability,
+                    chunk.media_ref,
+                    chunk.media_type,
+                    chunk.preview_b64,
+                ),
+            )
+            row = await cur.fetchone()
+            await conn.commit()
+            new_id = str(row[0])
+
+    await audit.record(
+        "insert",
+        subject_id=new_id,
+        actor=actor,
+        kind=chunk.kind,
+        content=chunk.content,
+        metadata={
+            "media_ref": chunk.media_ref,
+            "media_type": chunk.media_type,
+            "context": context,
+            "tags": tags or [],
+            **{k: v for k, v in (chunk.metadata or {}).items()
+               if k in ("sha256", "w", "h", "bytes", "t_start_s", "t_end_s")},
+        },
+    )
+    return {
+        "id": new_id,
+        "kind": chunk.kind,
+        "media_type": chunk.media_type,
+    }
 
 
 # ---------------------------------------------------------------------------

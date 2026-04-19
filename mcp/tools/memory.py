@@ -2,10 +2,82 @@
 
 import logging
 
+from pathlib import Path
+
 from helpers import error_response
 from memory import db, store
+from memory import media as _media
+from memory.chunker_audio import chunk_audio as _chunk_audio
+from memory.chunker_image import chunk_image as _chunk_image
+from memory.chunker_pdf import chunk_pdf as _chunk_pdf
+from memory.chunker_video import chunk_video as _chunk_video
+from memory.types import MediaChunk
 
 log = logging.getLogger("memory")
+
+
+# Extension → (modality label, lazy chunker). Only images are wired in
+# Wave 2A; video/audio/pdf raise NotImplementedError with a pointer to
+# the wave that enables them. Agents B/C replace those branches with
+# real chunkers without touching the surrounding tool.
+_MEDIA_ROUTES: dict[str, str] = {
+    ".png": "image",
+    ".jpg": "image",
+    ".jpeg": "image",
+    ".webp": "image",
+    ".mp4": "video",
+    ".mov": "video",
+    ".mp3": "audio",
+    ".wav": "audio",
+    ".pdf": "pdf",
+}
+
+
+def _route_media(path: Path, *, caption: str | None = None) -> list[MediaChunk]:
+    """Dispatch a media file to its chunker based on extension.
+
+    Returns a list of MediaChunks — images and PDFs naturally produce 1
+    or more, videos/audio may produce many segments. The caller
+    (`remember_media`) iterates and upserts each chunk.
+    """
+    suffix = path.suffix.lower()
+    modality = _MEDIA_ROUTES.get(suffix)
+    if modality is None:
+        raise ValueError(
+            f"extension {suffix!r} is not a recognised media type. "
+            f"Allowed: {sorted(_MEDIA_ROUTES.keys())}"
+        )
+    if modality == "image":
+        return [_chunk_image(path, caption=caption)]
+    if modality == "video":
+        # Segment files must outlive every `store.upsert_media_chunk` call
+        # (the backend reads them during the embed step). `mkdtemp` returns
+        # a directory that survives the function; the OS /tmp reaper
+        # eventually cleans it. We stash the path in metadata so callers
+        # can optionally remove it after all upserts complete.
+        import tempfile as _tempfile
+        tmpdir = _tempfile.mkdtemp(prefix="aleph-video-")
+        chunks = _chunk_video(path, out_dir=Path(tmpdir), caption=caption)
+        if not chunks:
+            raise RuntimeError(f"chunk_video returned no scenes for {path}")
+        for c in chunks:
+            c.metadata.setdefault("_tmpdir", tmpdir)
+        return chunks
+    if modality == "audio":
+        import tempfile as _tempfile
+        tmpdir = _tempfile.mkdtemp(prefix="aleph-audio-")
+        chunks = _chunk_audio(path, out_dir=Path(tmpdir), transcript=caption)
+        if not chunks:
+            raise RuntimeError(f"chunk_audio returned no clips for {path}")
+        for c in chunks:
+            c.metadata.setdefault("_tmpdir", tmpdir)
+        return chunks
+    if modality == "pdf":
+        chunks = _chunk_pdf(path)
+        if not chunks:
+            raise RuntimeError(f"chunk_pdf returned no pages for {path}")
+        return chunks
+    raise ValueError(f"unhandled modality: {modality}")
 
 
 def register(mcp):
@@ -53,6 +125,65 @@ def register(mcp):
             return {"error": "content must not be empty"}
         try:
             return await store.insert_insight(content.strip(), context, source_path, tags)
+        except db.MemoryDisabled:
+            return {"error": "semantic memory is disabled"}
+        except Exception as e:
+            return error_response(e)
+
+    @mcp.tool()
+    async def remember_media(path: str, context: str = "",
+                             caption: str | None = None,
+                             tags: list[str] | None = None) -> dict:
+        """Embed a local media file as an insight-like memory.
+
+        Phase 1 wires only images (PNG/JPEG/WEBP). Video/audio/PDF are
+        stubbed out with a clear NotImplementedError and will be enabled
+        in Waves 2B/2C.
+
+        Requires the active embedder backend to support the modality (e.g.
+        `EMBED_BACKEND=gemini-2-preview`). Without a multimodal backend,
+        the call returns a structured error instead of silently failing.
+
+        Args:
+            path: Absolute path to a media file.
+            context: Free-form note (ticket URL, customer, etc).
+            caption: Optional human caption; becomes the `content` field.
+            tags: Optional list of string tags.
+        """
+        from pathlib import Path as _Path
+
+        if not path or not path.strip():
+            return {"error": "path must not be empty"}
+        p = _Path(path)
+        if not p.is_absolute():
+            return {"error": f"path must be absolute: {path}"}
+        if not p.is_file():
+            return {"error": f"file not found: {path}"}
+
+        try:
+            chunks = _route_media(p, caption=caption)
+            inserted = []
+            for chunk in chunks:
+                res = await store.upsert_media_chunk(
+                    chunk, context=context, tags=tags,
+                )
+                inserted.append(res)
+            # Single-modality summary shape.
+            return {
+                "count": len(inserted),
+                "kind": inserted[0].get("kind") if inserted else None,
+                "media_type": inserted[0].get("media_type") if inserted else None,
+                "ids": [r.get("id") for r in inserted],
+                # For single-chunk media (images) the top-level `id` field
+                # preserves the old single-insert response shape.
+                "id": inserted[0].get("id") if len(inserted) == 1 else None,
+            }
+        except NotImplementedError as e:
+            return {"error": str(e)}
+        except ValueError as e:
+            return {"error": f"invalid media: {e}"}
+        except RuntimeError as e:
+            return {"error": str(e)}
         except db.MemoryDisabled:
             return {"error": "semantic memory is disabled"}
         except Exception as e:

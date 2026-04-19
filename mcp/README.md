@@ -129,6 +129,22 @@ the initial `memory.bootstrap` embedding pass automatically. Secrets
 (`PG_DSN`, `GOOGLE_API_KEY`, `MEMORY_ENABLED`) live in the `.env` file on the
 VM and are never committed.
 
+### Choosing a backend
+
+Embeddings go through a pluggable registry under `mcp/memory/embedders/`.
+Pick one with `EMBED_BACKEND`:
+
+- `gemini-001` *(default)* — text-only, 1536-dim, cheapest cloud.
+- `gemini-2-preview` — multimodal (text + image + video + audio + pdf),
+  3072-dim native with MRL truncation.
+- `local` — offline via Ollama (`bge-m3` by default, 1024-dim). Requires
+  `ollama pull bge-m3` and `EMBED_DIM=1024`.
+
+Backends produce incompatible vector spaces, so switching requires a
+full re-bootstrap (`CONFIRM_REEMBED=yes python -m memory.bootstrap
+--reembed-all`). See `PRD_MULTIMODAL.md §5.0` for the full trade-off
+matrix.
+
 ### Tools exposed
 
 - `semantic_search(query, kind?, limit, min_score)` — unified vector search across docs, insights and interactions.

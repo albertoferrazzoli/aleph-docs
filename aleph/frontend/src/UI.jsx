@@ -208,6 +208,56 @@ function AuditHistory({ nodeId, fetchAudit }) {
   );
 }
 
+function MediaRenderer({ node }) {
+  const mt = node.media_type || '';
+  if (!node.media_ref) return <div className="rp-content">{node.content}</div>;
+  const src = `/aleph/api/media/${node.id}`;
+  if (mt.startsWith('image/')) {
+    return <img className="rp-media" src={src} alt={node.content} loading="lazy" />;
+  }
+  if (mt.startsWith('video/')) {
+    const t = /#t=([\d.]+)/.exec(node.media_ref)?.[1];
+    return (
+      <video className="rp-media" controls preload="metadata"
+             src={`${src}${t ? `#t=${t}` : ''}`} />
+    );
+  }
+  if (mt.startsWith('audio/')) {
+    const m = /#t=([\d.]+),([\d.]+)/.exec(node.media_ref);
+    return (
+      <div className="rp-audio">
+        <audio className="rp-media" controls preload="metadata" src={src} />
+        {m && (
+          <div className="mono" style={{ fontSize: 10, opacity: 0.6 }}>
+            {m[1]}s – {m[2]}s
+          </div>
+        )}
+      </div>
+    );
+  }
+  if (mt === 'application/pdf') {
+    const page = /#page=(\d+)/.exec(node.media_ref)?.[1];
+    return (
+      <div className="rp-pdf">
+        {node.preview_b64 && (
+          <img
+            src={`data:image/jpeg;base64,${node.preview_b64}`}
+            alt="page preview"
+            style={{ maxWidth: '100%' }}
+          />
+        )}
+        <a
+          className="btn"
+          href={`${src}${page ? `#page=${page}` : ''}`}
+          target="_blank"
+          rel="noreferrer"
+        >open pdf{page ? ` · page ${page}` : ''}</a>
+      </div>
+    );
+  }
+  return <div className="rp-content">{node.content}</div>;
+}
+
 export function RightPanel({ node, neighbors, onClose, onForget, onJump, onIsolate, isolated, fetchAudit }) {
   if (!node) return null;
   const kindColor = KIND_SWATCH[node.kind] || '#94a3b8';
@@ -218,7 +268,10 @@ export function RightPanel({ node, neighbors, onClose, onForget, onJump, onIsola
         <button className="rp-close" onClick={onClose}>×</button>
       </div>
       <div className="rp-id mono">{node.id}</div>
-      <div className="rp-content">{node.content}</div>
+      <MediaRenderer node={node} />
+      {node.media_ref && node.content && (
+        <div className="rp-content" style={{ opacity: 0.7 }}>{node.content}</div>
+      )}
 
       {node.source_path && (
         <div className="rp-meta-row mono">

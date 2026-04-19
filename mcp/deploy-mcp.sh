@@ -281,6 +281,12 @@ if [ "$SKIP_PG" = false ]; then
         fi
         sudo systemctl enable --now postgresql
 
+        # 1d. Install ffmpeg (required by the video/audio chunkers when using
+        # a multimodal embed backend; no-op if not using them).
+        if ! command -v ffmpeg >/dev/null 2>&1; then
+            sudo DEBIAN_FRONTEND=noninteractive apt-get install -y ffmpeg
+        fi
+
         # 2. Create DB + role (idempotent)
         sudo -u postgres psql -tc \"SELECT 1 FROM pg_database WHERE datname='$PG_DB_NAME'\" | grep -q 1 \\
             || sudo -u postgres createdb $PG_DB_NAME
