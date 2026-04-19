@@ -278,18 +278,9 @@ docker compose up --build
 # 4. Open the viewer
 open http://localhost:8765/
 
-# 5. Point Claude Desktop at the MCP
-cat >> "$HOME/Library/Application Support/Claude/claude_desktop_config.json" <<JSON
-{
-  "mcpServers": {
-    "aleph-docs": {
-      "type": "url",
-      "url": "http://localhost:8001/mcp",
-      "headers": { "Authorization": "Bearer YOUR_MCP_API_KEY" }
-    }
-  }
-}
-JSON
+# 5. Connect Claude Desktop (see "Connecting Claude Desktop" below for
+#    the full config; Claude Desktop needs an stdio bridge, not a
+#    direct URL).
 ```
 
 Everything persists across restarts:
@@ -375,22 +366,101 @@ Full production bring-up (systemd, Apache reverse proxy, TLS, etc.) is in
 
 ---
 
-## Connecting Claude Desktop (or any MCP client)
+## Connecting Claude Desktop
 
-Once the MCP is running behind HTTPS:
+### Docker setup (local, most common)
+
+When the stack runs via `docker compose up` on your machine, the MCP is
+exposed on `http://localhost:8001/mcp` (or whatever port you set in
+`MCP_PORT`). Claude Desktop does **not** speak HTTP-MCP natively — you
+need the [`mcp-remote`](https://www.npmjs.com/package/mcp-remote)
+stdio bridge (shipped with `npx`, no install required).
+
+**Prereqs**: Node.js 18+ (comes with `npx`). Check with `node --version`.
+
+**Edit** `~/Library/Application Support/Claude/claude_desktop_config.json`
+(macOS) or `%APPDATA%\Claude\claude_desktop_config.json` (Windows).
+Merge the `mcpServers` block — keep any existing servers you have:
 
 ```jsonc
-// ~/Library/Application Support/Claude/claude_desktop_config.json
+{
+  "mcpServers": {
+    "aleph-docs-local": {
+      "command": "npx",
+      "args": [
+        "-y", "mcp-remote",
+        "http://localhost:8001/mcp",
+        "--header",
+        "Authorization:Bearer <YOUR_MCP_API_KEY>"
+      ]
+    }
+  }
+}
+```
+
+Replace `<YOUR_MCP_API_KEY>` with the value from your `.env`. If you
+changed `MCP_PORT`, update the URL accordingly (e.g. `8002`).
+
+**Restart Claude Desktop completely** (⌘Q on macOS, then reopen). Open
+a new chat — `aleph-docs-local` appears among the available MCP servers.
+
+Smoke test:
+
+> Use semantic_search of aleph-docs-local to find what my docs say about `X`.
+
+### Hosted setup (behind HTTPS, remote VM)
+
+When the MCP is exposed at a public HTTPS URL (e.g. behind a reverse
+proxy on a VM), Claude Desktop can point at it via the same
+`mcp-remote` bridge:
+
+```jsonc
+{
+  "mcpServers": {
+    "aleph-docs": {
+      "command": "npx",
+      "args": [
+        "-y", "mcp-remote",
+        "https://your-domain.example/aleph/mcp",
+        "--header",
+        "Authorization:Bearer <MCP_API_KEY>"
+      ]
+    }
+  }
+}
+```
+
+### Claude Code (native URL support)
+
+Claude Code CLI supports direct URL-type MCP servers in `.mcp.json`
+without any bridge:
+
+```jsonc
+// .mcp.json at the repo root
 {
   "mcpServers": {
     "aleph-docs": {
       "type": "url",
-      "url": "https://your-domain.example/mcp",
+      "url": "http://localhost:8001/mcp",
       "headers": { "Authorization": "Bearer <MCP_API_KEY>" }
     }
   }
 }
 ```
+
+Claude Code also renders the MCP `Image` content blocks emitted by
+`search_images` / `fetch_image` inline — Claude Desktop only renders
+them as markdown links (see [`mcp/PROJECT_INSTRUCTIONS.md`](mcp/PROJECT_INSTRUCTIONS.md)).
+
+### Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| `aleph-docs-local` doesn't appear in Claude Desktop after restart | Check the JSON is valid (`python3 -m json.tool < config.json`). Backup file is restored by mistake? Restart fully with ⌘Q, not just close window. |
+| Tool calls time out | `docker compose ps` — is the `mcp` container healthy? `curl -H "Authorization: Bearer $KEY" http://localhost:8001/health` returns 200? |
+| "Permission denied" 401 errors | The `Authorization:Bearer …` value in the config must match `MCP_API_KEY` in `./.env` exactly (no trailing newline, no spaces inside). |
+| Images from `search_images` show as text not pictures | Claude Desktop's sandbox filters inline images from tool responses. The tool output includes clickable `open preview` / `open source` links — click them to open in a browser. Switch to Claude Code for inline rendering. |
+| Port 8001 already in use | Edit `.env`: `MCP_PORT=8002` (or any free port), `docker compose up -d`, and update the URL in the Claude Desktop config. |
 
 See [`mcp/PROJECT_INSTRUCTIONS.md`](mcp/PROJECT_INSTRUCTIONS.md) for a
 system-prompt template that teaches Claude when to use which tool.
