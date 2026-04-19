@@ -390,10 +390,45 @@ async def get_media(memory_id: str, request: Request) -> FileResponse:
             "[aleph] /media/%s refused: ref=%r not under MEDIA_ROOT=%s or /tmp",
             memory_id, media_ref, _MEDIA_ROOT,
         )
-        # 403 when the reference exists but points outside the allowlist;
-        # 404 when the file is missing. We can't tell reliably here
-        # (resolve(strict) collapses both), so 403 is the safer default.
         raise HTTPException(status_code=403, detail="media path not allowed")
+
+    # Special case: PDF-extracted image nodes have media_ref like
+    # `/foo.pdf#page=3&img=2` but media_type='image/png'. Re-extract the
+    # embedded raster on demand so we don't need persistent storage.
+    import re as _re
+    if (media_type or "").startswith("image/") and "#page=" in media_ref and "img=" in media_ref:
+        m = _re.search(r"#page=(\d+)(?:&img=(\d+))?", media_ref)
+        if m and m.group(2):
+            page_n = int(m.group(1))
+            img_n = int(m.group(2))
+            try:
+                import pypdfium2 as pdfium
+                import io as _io
+                pdf = pdfium.PdfDocument(str(resolved))
+                try:
+                    page = pdf[page_n - 1]
+                    try:
+                        imgs = list(page.get_objects(
+                            filter=(pdfium.raw.FPDF_PAGEOBJ_IMAGE,),
+                            max_depth=5,
+                        ))
+                    finally:
+                        page.close()
+                    if img_n < 1 or img_n > len(imgs):
+                        raise HTTPException(status_code=404, detail="image index out of range")
+                    pil = imgs[img_n - 1].get_bitmap().to_pil()
+                    buf = _io.BytesIO()
+                    pil.save(buf, format="PNG", optimize=True)
+                    buf.seek(0)
+                    from starlette.responses import StreamingResponse
+                    return StreamingResponse(buf, media_type="image/png")
+                finally:
+                    pdf.close()
+            except HTTPException:
+                raise
+            except Exception as e:
+                log.warning("[aleph] /media/%s pdf image extract failed: %s", memory_id, e)
+                raise HTTPException(status_code=500, detail="pdf image extract error")
 
     mt = media_type or "application/octet-stream"
     return FileResponse(str(resolved), media_type=mt, filename=resolved.name)

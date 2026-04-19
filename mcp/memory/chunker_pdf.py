@@ -147,6 +147,75 @@ def chunk_pdf(path: Path, stack: ExitStack | None = None) -> list[MediaChunk]:
                 },
                 path=png_path,
             ))
+
+            # Additionally: extract embedded raster images as separate
+            # `image` chunks so they are searchable at fine granularity.
+            # IMPORTANT: PdfObjects returned by get_objects() hold refs
+            # into the parent page. We must extract bitmaps AND save them
+            # BEFORE closing the page, or pypdfium2 segfaults on
+            # use-after-free.
+            extracted: list[tuple[int, "Path", int, int]] = []  # (j, path, w, h)
+            try:
+                page_for_imgs = pdf[i]
+                try:
+                    img_objs = list(page_for_imgs.get_objects(
+                        filter=(pdfium.raw.FPDF_PAGEOBJ_IMAGE,),
+                        max_depth=5,
+                    ))
+                    for j, obj in enumerate(img_objs):
+                        try:
+                            bm = obj.get_bitmap()
+                            pil = bm.to_pil()
+                        except Exception as e:
+                            logger.debug(
+                                "chunk_pdf: bitmap failed p%d img%d: %s",
+                                i + 1, j + 1, e,
+                            )
+                            continue
+                        if pil.width < 64 or pil.height < 64:
+                            # Skip tiny glyphs / icons — noise.
+                            continue
+                        img_path = tmpdir / f"page-{i + 1:04d}-img-{j + 1:03d}.png"
+                        try:
+                            pil.save(img_path, format="PNG", optimize=True)
+                        except Exception as e:
+                            logger.debug(
+                                "chunk_pdf: save failed p%d img%d: %s",
+                                i + 1, j + 1, e,
+                            )
+                            continue
+                        extracted.append((j, img_path, pil.width, pil.height))
+                finally:
+                    page_for_imgs.close()
+            except Exception as e:
+                logger.debug("chunk_pdf: image pass failed p%d: %s", i + 1, e)
+
+            # Now that the page is closed, the saved PNGs are independent
+            # on-disk files — safe to thumbnail + wrap in MediaChunk.
+            for j, img_path, w, h in extracted:
+                try:
+                    img_preview = media.make_image_thumbnail(img_path)
+                except Exception as e:
+                    logger.debug("chunk_pdf: thumbnail failed p%d img%d: %s",
+                                 i + 1, j + 1, e)
+                    continue
+                chunks.append(MediaChunk(
+                    kind="image",
+                    content=f"Image {j + 1} of page {i + 1} · {stem}",
+                    media_ref=f"{abs_path}#page={i + 1}&img={j + 1}",
+                    media_type="image/png",
+                    preview_b64=img_preview,
+                    metadata={
+                        "source_pdf": str(abs_path),
+                        "source_pdf_sha256": sha256,
+                        "page": i + 1,
+                        "img_index": j + 1,
+                        "w": w,
+                        "h": h,
+                        "_tmpdir": str(tmpdir) if owned_stack else None,
+                    },
+                    path=img_path,
+                ))
     finally:
         pdf.close()
         if owned_stack:
