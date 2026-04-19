@@ -1,8 +1,11 @@
 """Semantic memory tools for Aleph Docs MCP."""
 
+import base64
 import logging
 
 from pathlib import Path
+
+from fastmcp.utilities.types import Image
 
 from helpers import error_response
 from memory import db, store
@@ -14,6 +17,9 @@ from memory.chunker_video import chunk_video as _chunk_video
 from memory.types import MediaChunk
 
 log = logging.getLogger("memory")
+
+_MEDIA_KINDS = frozenset({"image", "pdf_page", "video_scene", "audio_clip"})
+_ALL_KINDS = frozenset({"doc_chunk", "interaction", "insight"}) | _MEDIA_KINDS
 
 
 # Extension → (modality label, lazy chunker). Only images are wired in
@@ -84,27 +90,188 @@ def register(mcp):
     @mcp.tool()
     async def semantic_search(query: str, kind: str | None = None,
                               limit: int = 10, min_score: float = 0.15) -> dict:
-        """Semantic vector search across the unified memory (docs, interactions, insights).
+        """Semantic vector search across the unified memory.
 
-        Returns results ranked by similarity x forgetting-curve decay. Each hit
-        is reinforced atomically (access_count, stability bumped).
+        Covers all 7 memory kinds: doc_chunk, interaction, insight (text),
+        and image, video_scene, audio_clip, pdf_page (media). Results are
+        ranked by similarity x forgetting-curve decay. Each hit is
+        reinforced atomically.
+
+        NOTE on min_score for cross-modal queries: text->image/video/audio
+        cosine similarities run lower (~0.2–0.45) than text->text
+        (~0.4–0.85). For mixed-modality queries keep min_score at 0.15
+        and let the ranking sort itself out; do NOT raise to 0.5 or
+        media hits will all be filtered out.
 
         Args:
-            query: Natural-language query (sentence or keywords work equally).
-            kind: Optional filter - 'doc_chunk', 'interaction', or 'insight'.
+            query: Natural-language query.
+            kind: Optional filter - one of:
+                'doc_chunk', 'interaction', 'insight',
+                'image', 'video_scene', 'audio_clip', 'pdf_page'.
             limit: Max results (1-50, default 10).
-            min_score: Filter out results below this score (default 0.15).
+            min_score: Minimum score to include (default 0.15).
         """
         try:
             limit = max(1, min(int(limit), 50))
-            if kind and kind not in ("doc_chunk", "interaction", "insight"):
-                return {"error": f"invalid kind: {kind}"}
+            if kind and kind not in _ALL_KINDS:
+                return {"error": f"invalid kind: {kind}. allowed: {sorted(_ALL_KINDS)}"}
             results = await store.search(query, kind=kind, limit=limit, min_score=min_score)
             return {"query": query, "kind": kind, "count": len(results), "results": results}
         except db.MemoryDisabled:
             return {"error": "semantic memory is disabled (set MEMORY_ENABLED=true + PG_DSN)"}
         except Exception as e:
             return error_response(e)
+
+    async def _fetch_preview(memory_id: str) -> tuple[bytes | None, str | None, dict | None]:
+        """Return (png_bytes, media_type, row_meta) for a memory id.
+
+        - If preview_b64 is stored, decode it (fast, 20KB).
+        - Else: return (None, media_type, row_meta) so callers can fall back
+          to full-res extraction via the media endpoint.
+        """
+        if not db.is_enabled():
+            return None, None, None
+        async with db.get_conn() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT kind::text, content, source_path, media_ref, "
+                    "       media_type, preview_b64 "
+                    "FROM memories WHERE id = %s",
+                    (memory_id,),
+                )
+                row = await cur.fetchone()
+        if not row:
+            return None, None, None
+        kind, content, sp, media_ref, media_type, preview_b64 = row
+        meta = {"kind": kind, "content": content, "source_path": sp,
+                "media_ref": media_ref, "media_type": media_type}
+        if not preview_b64:
+            return None, media_type, meta
+        try:
+            data = base64.b64decode(preview_b64)
+        except Exception:
+            return None, media_type, meta
+        return data, media_type or "image/jpeg", meta
+
+    @mcp.tool(output_schema=None)
+    async def search_images(query: str, limit: int = 8,
+                            min_score: float = 0.15):
+        """Search for visual chunks and return the actual image previews.
+
+        Same ranking as semantic_search but restricted to kinds that have
+        a rendered preview (image / pdf_page / video_scene) and formatted
+        so Claude Desktop (or any MCP client) renders them inline as
+        images, not as JSON.
+
+        Response is a list: [summary_text, Image, Image, ...].
+        Each Image is a ≤ 20 KB thumbnail (JPEG) suitable for quick
+        preview; for full-resolution use fetch_image(memory_id).
+
+        Args:
+            query: Natural-language query ("candle wick sweep above highs").
+            limit: Max images to return (1-20, default 8).
+            min_score: Minimum score (default 0.15).
+        """
+        try:
+            limit = max(1, min(int(limit), 20))
+            # Search across the three preview-capable kinds and merge.
+            per_kind = 4
+            hits = []
+            for k in ("image", "pdf_page", "video_scene"):
+                rs = await store.search(query, kind=k, limit=per_kind, min_score=min_score)
+                hits.extend(rs)
+            hits.sort(key=lambda r: r.get("score", 0), reverse=True)
+            hits = hits[:limit]
+
+            if not hits:
+                return [f'no visual hits for "{query}" above score {min_score}']
+
+            out: list = []
+            summary_lines = [f'top {len(hits)} visual hits for "{query}":']
+            for i, h in enumerate(hits, 1):
+                mid = h.get("id")
+                score = h.get("score", 0)
+                kind = h.get("kind", "?")
+                src = h.get("source_path") or h.get("media_ref") or "?"
+                summary_lines.append(
+                    f"  {i}. {kind:12s} score={score:.3f}  {src}"
+                )
+                data, mime, _ = await _fetch_preview(mid)
+                if data:
+                    # Format hint: the preview thumbnailer emits JPEG bytes
+                    # behind a base64; infer format from the mime or default.
+                    fmt = "jpeg"
+                    if (mime or "").endswith("png") or (mime or "") == "image/png":
+                        fmt = "png"
+                    out.append(Image(data=data, format=fmt))
+            out.insert(0, "\n".join(summary_lines))
+            return out
+        except db.MemoryDisabled:
+            return ["error: semantic memory is disabled"]
+        except Exception as e:
+            log.warning("[memory] search_images failed: %s", e)
+            return [f"error: {type(e).__name__}: {str(e)[:200]}"]
+
+    @mcp.tool(output_schema=None)
+    async def fetch_image(memory_id: str, full_res: bool = False):
+        """Return the image of a specific memory as an Image content block.
+
+        Use after semantic_search / search_images when you want to inspect
+        one specific hit more closely.
+
+        Args:
+            memory_id: UUID of the memory.
+            full_res: If true and the memory refers to an image embedded in
+                a PDF, re-extract the full-resolution raster from the PDF.
+                If false (default), return the stored thumbnail (≤ 20 KB).
+        """
+        try:
+            data, mime, meta = await _fetch_preview(memory_id)
+            if not meta:
+                return [f"error: memory {memory_id} not found"]
+            if full_res and meta.get("kind") == "image" and meta.get("media_ref") and "#page=" in meta["media_ref"]:
+                # Re-extract from the source PDF (same logic as aleph /media endpoint).
+                import re as _re, io as _io
+                m = _re.search(r"#page=(\d+)(?:&img=(\d+))?", meta["media_ref"])
+                pdf_path = meta["media_ref"].split("#", 1)[0]
+                if m and m.group(2):
+                    try:
+                        import pypdfium2 as pdfium
+                        pdf = pdfium.PdfDocument(pdf_path)
+                        try:
+                            page = pdf[int(m.group(1)) - 1]
+                            try:
+                                imgs = list(page.get_objects(
+                                    filter=(pdfium.raw.FPDF_PAGEOBJ_IMAGE,),
+                                    max_depth=5,
+                                ))
+                                idx = int(m.group(2)) - 1
+                                if 0 <= idx < len(imgs):
+                                    pil = imgs[idx].get_bitmap().to_pil()
+                                    buf = _io.BytesIO()
+                                    pil.save(buf, format="PNG", optimize=True)
+                                    data = buf.getvalue()
+                                    mime = "image/png"
+                            finally:
+                                page.close()
+                        finally:
+                            pdf.close()
+                    except Exception as e:
+                        log.warning("[memory] fetch_image full_res failed: %s", e)
+            if not data:
+                return [
+                    f"memory {memory_id} has no preview (kind={meta.get('kind')})"
+                ]
+            fmt = "png" if (mime or "").endswith("png") else "jpeg"
+            return [
+                f"memory {memory_id} ({meta.get('kind')}): {meta.get('source_path') or meta.get('media_ref') or ''}",
+                Image(data=data, format=fmt),
+            ]
+        except db.MemoryDisabled:
+            return ["error: semantic memory is disabled"]
+        except Exception as e:
+            log.warning("[memory] fetch_image failed: %s", e)
+            return [f"error: {type(e).__name__}: {str(e)[:200]}"]
 
     @mcp.tool()
     async def remember(content: str, context: str = "",
