@@ -32,7 +32,8 @@ log = logging.getLogger("aleph")
 
 SELECT_ROWS_SQL = """
 SELECT id, embedding, kind::text, source_path, source_section, content,
-       metadata, created_at, last_access_at, access_count, stability
+       metadata, created_at, last_access_at, access_count, stability,
+       media_ref, media_type, preview_b64
 FROM memories
 """
 
@@ -138,7 +139,7 @@ async def build_snapshot() -> dict:
     nodes: list[dict] = []
     for i, r in enumerate(rows):
         (rid, _emb, kind, sp, ss, content, meta, created, last_access,
-         ac, stab) = r
+         ac, stab, media_ref, media_type, preview_b64) = r
         x, y, z = (float(xyz[i, 0]), float(xyz[i, 1]), float(xyz[i, 2]))
         # guard against NaN/inf — would blow up JSON
         if not (math.isfinite(x) and math.isfinite(y) and math.isfinite(z)):
@@ -156,6 +157,9 @@ async def build_snapshot() -> dict:
             "last_access_at": _iso(last_access),
             "access_count": int(ac),
             "stability": float(stab),
+            "media_ref": media_ref,
+            "media_type": media_type,
+            "preview_b64": preview_b64,
         })
 
     # Top-k edges — dedupe so each pair appears once (a<b).

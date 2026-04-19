@@ -216,7 +216,7 @@ async def fetch_pending_memories(known_ids: set, limit: int = 500) -> list:
             await cur.execute(
                 "SELECT id, kind::text, content, source_path, source_section, "
                 "       metadata, created_at, last_access_at, access_count, "
-                "       stability "
+                "       stability, media_ref, media_type, preview_b64 "
                 "FROM memories "
                 "WHERE NOT (id::text = ANY(%s)) "
                 "ORDER BY created_at DESC "
@@ -227,7 +227,7 @@ async def fetch_pending_memories(known_ids: set, limit: int = 500) -> list:
             out = []
             for row in pending_rows:
                 (rid, kind, content, sp, ss, meta, created, last_access,
-                 ac, stab) = row
+                 ac, stab, media_ref, media_type, preview_b64) = row
                 # Top-3 neighbors restricted to known (already-positioned) nodes.
                 await cur.execute(
                     "SELECT m.id::text "
@@ -251,6 +251,9 @@ async def fetch_pending_memories(known_ids: set, limit: int = 500) -> list:
                     "access_count": int(ac),
                     "stability": float(stab),
                     "anchor_ids": anchor_ids,
+                    "media_ref": media_ref,
+                    "media_type": media_type,
+                    "preview_b64": preview_b64,
                 })
     return out
 
