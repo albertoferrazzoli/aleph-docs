@@ -2,6 +2,16 @@
 
 **A reusable template for a documentation-aware LLM knowledge system that learns from use.**
 
+![Aleph viewer — 3D semantic memory graph over a real docs corpus](assets/aleph-viewer.png)
+
+*The Aleph 3D viewer on a live instance: blue nodes are `doc_chunk` memories
+embedded from a Markdown repo, yellow are auto-recorded `interaction`
+memories from search tools, pink are `insight` memories saved manually via
+`remember()`. Edges are top-k cosine neighbors (solid ≥ 0.60, dashed
+< 0.60). The right panel shows the selected chunk with its stability,
+decay, access count and top-k neighbors; the bottom log streams inserts,
+reinforcements and deletes live via Postgres LISTEN/NOTIFY.*
+
 ## What this is
 
 Aleph Docs turns any Markdown documentation repository into a **living
