@@ -156,21 +156,30 @@ def register(mcp):
     @mcp.tool(output_schema=None)
     async def search_images(query: str, limit: int = 8,
                             min_score: float = 0.15):
-        """Search for visual chunks and return the actual image previews.
+        """Search for visual chunks (images, PDF pages, video scenes).
 
-        Same ranking as semantic_search but restricted to kinds that have
-        a rendered preview (image / pdf_page / video_scene) and formatted
-        so Claude Desktop (or any MCP client) renders them inline as
-        images, not as JSON.
+        IMPORTANT — how to present these results to the user:
+        Each hit comes with TWO clickable URLs:
+          • `open preview` → opens the JPEG thumbnail in the browser
+          • `open source`  → opens the original PDF / video / image
+        YOU MUST surface these links verbatim in your reply — do NOT
+        paraphrase them away. The user often can't see the inline
+        thumbnails that the client may filter; the links are the
+        reliable fallback. Keep the markdown headings, scores, and
+        links from this tool's output as-is in your reply, then add
+        your commentary/analysis BELOW them.
 
-        Response is a list: [summary_text, Image, Image, ...].
-        Each Image is a ≤ 20 KB thumbnail (JPEG) suitable for quick
-        preview; for full-resolution use fetch_image(memory_id).
+        Response structure:
+          1. markdown text: one section per hit with score, source,
+             inline data-URI preview, and two clickable URLs
+          2. native MCP Image blocks: one per hit (rendered by
+             Claude Code / MCP Inspector; invisible in Claude Desktop)
 
         Args:
-            query: Natural-language query ("candle wick sweep above highs").
+            query: Natural-language query (e.g. "candle wick sweep above highs").
             limit: Max images to return (1-20, default 8).
-            min_score: Minimum score (default 0.15).
+            min_score: Minimum score (default 0.15 — do NOT raise
+                above 0.4 for cross-modal queries or you lose hits).
         """
         try:
             limit = max(1, min(int(limit), 20))
@@ -201,7 +210,14 @@ def register(mcp):
                 "ALEPH_PUBLIC_URL", "http://localhost:8765/aleph/api"
             )
 
-            md_lines = [f'## top {len(hits)} visual hits for "{query}"', ""]
+            md_lines = [
+                f'## top {len(hits)} visual hits for "{query}"',
+                "",
+                "*When relaying to the user, keep the `open preview` / "
+                "`open source` links below verbatim — they are the user's "
+                "only way to actually see the chart.*",
+                "",
+            ]
             image_blocks: list = []
             for i, h in enumerate(hits, 1):
                 mid = h.get("id")
