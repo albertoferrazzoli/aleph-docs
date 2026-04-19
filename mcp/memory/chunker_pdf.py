@@ -70,10 +70,15 @@ def chunk_pdf(path: Path, stack: ExitStack | None = None) -> list[MediaChunk]:
             "Add `pypdfium2>=4.30` to mcp/requirements.txt."
         ) from e
 
+    # If the caller provided a stack, tmpdir lifetime is scoped to it.
+    # Otherwise use mkdtemp (survives until OS /tmp reaper) so the PNG
+    # page files stay available for the subsequent embedding call that
+    # happens after this function returns.
     owned_stack = stack is None
-    if stack is None:
-        stack = ExitStack()
-    tmpdir = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix="aleph-pdf-")))
+    if owned_stack:
+        tmpdir = Path(tempfile.mkdtemp(prefix="aleph-pdf-"))
+    else:
+        tmpdir = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix="aleph-pdf-")))
 
     abs_path = path.resolve()
     sha256 = media.sha256_file(path)
@@ -136,6 +141,9 @@ def chunk_pdf(path: Path, stack: ExitStack | None = None) -> list[MediaChunk]:
                     "page": i + 1,
                     "total_pages": total,
                     "text_chars": len(text),
+                    # Stash so callers can clean up after the embed step
+                    # (see tools/memory.py _route_media pattern).
+                    "_tmpdir": str(tmpdir) if owned_stack else None,
                 },
                 path=png_path,
             ))

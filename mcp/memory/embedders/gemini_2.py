@@ -120,7 +120,7 @@ class GeminiMultimodalBackend:
         model = os.environ.get("EMBED_MODEL") or EMBED_MODEL_ID
         logger.debug(
             "gemini-2-preview.embed: items=%d model=%s out_dim=%d",
-            len(items), model, out_dim,
+            len(parts), model, out_dim,
         )
 
         client = _get_client()
