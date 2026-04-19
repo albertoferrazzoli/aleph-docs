@@ -193,6 +193,14 @@ def register(mcp):
             # Why both: as of late 2026 Claude Desktop passes MCP image
             # blocks to the model but does NOT render them visually in
             # the chat thread. Markdown data URIs render reliably.
+            # Aleph backend URL for clickable browser links. Overridable
+            # via env — when running behind a reverse proxy set
+            # ALEPH_PUBLIC_URL=https://your-domain.example/aleph/api
+            import os as _os
+            aleph_base = _os.environ.get(
+                "ALEPH_PUBLIC_URL", "http://localhost:8765/aleph/api"
+            )
+
             md_lines = [f'## top {len(hits)} visual hits for "{query}"', ""]
             image_blocks: list = []
             for i, h in enumerate(hits, 1):
@@ -201,21 +209,24 @@ def register(mcp):
                 kind = h.get("kind", "?")
                 src = h.get("source_path") or h.get("media_ref") or "?"
                 data, mime, _ = await _fetch_preview(mid)
+                preview_url = f"{aleph_base}/preview/{mid}"
+                media_url = f"{aleph_base}/media/{mid}"
                 header = f"**{i}.** `{kind}` · score `{score:.3f}` · `{src}` · id `{mid}`"
                 if data:
-                    # preview_b64 is ALWAYS a JPEG thumbnail produced by
-                    # media.make_image_thumbnail; the `mime` returned here
-                    # describes the SOURCE media (could be application/pdf)
-                    # so we must force image/jpeg for the data URI.
-                    preview_mime = "image/jpeg"
+                    # Triple-channel delivery so the hit is visible in any MCP client:
+                    #  1) markdown data URI  → renders inline in clients that allow it
+                    #  2) clickable http URL → works in Claude Desktop (opens browser)
+                    #  3) native MCP Image block → Claude Code + spec-compliant clients
                     import base64 as _b64
                     b64 = _b64.b64encode(data).decode()
                     md_lines.append(header)
-                    md_lines.append(f"![hit {i}](data:{preview_mime};base64,{b64})")
+                    md_lines.append(f"![hit {i}](data:image/jpeg;base64,{b64})")
+                    md_lines.append(f"[🔍 open preview]({preview_url}) · [📄 open source]({media_url})")
                     md_lines.append("")
                     image_blocks.append(Image(data=data, format="jpeg"))
                 else:
                     md_lines.append(header + " *(no preview)*")
+                    md_lines.append(f"[📄 open source]({media_url})")
                     md_lines.append("")
             return ["\n".join(md_lines), *image_blocks]
         except db.MemoryDisabled:

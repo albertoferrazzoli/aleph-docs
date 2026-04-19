@@ -345,6 +345,38 @@ def _resolve_media_path(media_ref: str) -> Path | None:
         return None
 
 
+@app.get("/preview/{memory_id}")
+async def get_preview(memory_id: str) -> "Response":
+    """Return the stored preview thumbnail (JPEG) for a memory.
+
+    Fast lightweight endpoint used by external tools (e.g. Claude Desktop
+    markdown links). Unlike /media it never hits the source file — just
+    decodes `preview_b64` from the row. 404 if no preview stored.
+    """
+    import base64 as _b64
+    from starlette.responses import Response
+    if not db.is_enabled():
+        raise HTTPException(status_code=503, detail="memory disabled")
+    async with db.get_conn() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT preview_b64 FROM memories WHERE id = %s",
+                (memory_id,),
+            )
+            row = await cur.fetchone()
+    if not row or not row[0]:
+        raise HTTPException(status_code=404, detail="no preview")
+    try:
+        data = _b64.b64decode(row[0])
+    except Exception:
+        raise HTTPException(status_code=500, detail="preview decode error")
+    return Response(
+        content=data,
+        media_type="image/jpeg",
+        headers={"Cache-Control": "public, max-age=3600"},
+    )
+
+
 @app.get("/media/{memory_id}")
 async def get_media(memory_id: str, request: Request) -> FileResponse:
     """Stream raw media bytes referenced by a memory row.
