@@ -19,8 +19,10 @@ import os
 from contextlib import asynccontextmanager
 from typing import Any, Optional
 
+from pathlib import Path
+
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
@@ -283,6 +285,118 @@ async def get_node_audit(node_id: str, limit: int = 20) -> JSONResponse:
     except Exception as e:
         log.warning("[aleph] /node/%s/audit error: %s", node_id, e)
         return JSONResponse({"error": str(e), "events": []}, status_code=200)
+
+
+# ---------------------------------------------------------------------------
+# Media streaming
+# ---------------------------------------------------------------------------
+
+# MEDIA_ROOT is the allowlist base for on-disk media references. Anything
+# outside this tree is refused unless it lives under /tmp/ (dev-only, for
+# files explicitly added via remember_media with an absolute local path).
+# Keeping /tmp as a second allowed prefix matches the dev workflow
+# documented in the PRD — production deploys should put their media under
+# MEDIA_ROOT and leave /tmp cold.
+_MEDIA_ROOT = Path(os.getenv("MEDIA_ROOT", "/opt/aleph-docs/docs")).resolve()
+
+
+def _resolve_media_path(media_ref: str) -> Path | None:
+    """Validate `media_ref` and return a filesystem Path safe to serve.
+
+    Rules (all must pass):
+      1. Split on '#' — the part before the fragment is the on-disk path.
+      2. Must be absolute after resolve() (symlinks followed).
+      3. Must be a regular existing file.
+      4. Resolved path must live under MEDIA_ROOT **or** start with '/tmp/'.
+         Symlinks whose target is under MEDIA_ROOT are accepted because
+         .resolve() follows them before the allowlist check.
+
+    Returns None on any failure — caller maps to 403/404 as appropriate.
+    """
+    if not media_ref:
+        return None
+    # Strip fragment (#page=N, #t=1.2, #t=1.2,3.4 …).
+    raw = media_ref.split("#", 1)[0]
+    if not raw:
+        return None
+    try:
+        p = Path(raw)
+    except Exception:
+        return None
+    if not p.is_absolute():
+        return None
+    try:
+        resolved = p.resolve(strict=True)
+    except (FileNotFoundError, RuntimeError, OSError):
+        return None
+    if not resolved.is_file():
+        return None
+    # Allowlist check.
+    try:
+        resolved.relative_to(_MEDIA_ROOT)
+        return resolved
+    except ValueError:
+        pass
+    # Dev/escape hatch: /tmp/* is allowed for ad-hoc remember_media calls.
+    try:
+        resolved.relative_to(Path("/tmp").resolve())
+        return resolved
+    except ValueError:
+        return None
+
+
+@app.get("/media/{memory_id}")
+async def get_media(memory_id: str, request: Request) -> FileResponse:
+    """Stream raw media bytes referenced by a memory row.
+
+    Auth: relies on Apache-level Basic Auth in production; no extra
+    X-Aleph-Key is required (media is read-only and the viewer needs to
+    fetch it from an <img>/<video> tag that can't set custom headers).
+
+    Path safety: the on-disk path must resolve under MEDIA_ROOT (env,
+    defaults to /opt/aleph-docs/docs) or under /tmp/. Traversal attempts
+    (`../..`, symlinks escaping the allowlist, non-absolute paths) yield
+    404/403.
+
+    For PDFs referenced as `file.pdf#page=3` the whole file is returned;
+    the client uses the fragment to open the viewer at the requested
+    page.
+    """
+    if not db.is_enabled():
+        raise HTTPException(status_code=503, detail="memory subsystem disabled")
+
+    try:
+        async with db.get_conn() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT media_ref, media_type "
+                    "FROM memories WHERE id = %s",
+                    (memory_id,),
+                )
+                row = await cur.fetchone()
+    except Exception as e:
+        log.warning("[aleph] /media/%s db error: %s", memory_id, e)
+        raise HTTPException(status_code=500, detail="db error")
+
+    if not row:
+        raise HTTPException(status_code=404, detail="memory not found")
+    media_ref, media_type = row
+    if not media_ref:
+        raise HTTPException(status_code=404, detail="no media_ref on this memory")
+
+    resolved = _resolve_media_path(media_ref)
+    if resolved is None:
+        log.warning(
+            "[aleph] /media/%s refused: ref=%r not under MEDIA_ROOT=%s or /tmp",
+            memory_id, media_ref, _MEDIA_ROOT,
+        )
+        # 403 when the reference exists but points outside the allowlist;
+        # 404 when the file is missing. We can't tell reliably here
+        # (resolve(strict) collapses both), so 403 is the safer default.
+        raise HTTPException(status_code=403, detail="media path not allowed")
+
+    mt = media_type or "application/octet-stream"
+    return FileResponse(str(resolved), media_type=mt, filename=resolved.name)
 
 
 # ---------------------------------------------------------------------------

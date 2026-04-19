@@ -141,7 +141,7 @@ async def get_node(node_id: str) -> Optional[dict]:
             await cur.execute(
                 "SELECT id, kind::text, content, source_path, source_section, "
                 "       metadata, created_at, last_access_at, access_count, "
-                "       stability "
+                "       stability, media_ref, media_type, preview_b64 "
                 "FROM memories WHERE id = %s",
                 (node_id,),
             )
@@ -149,7 +149,7 @@ async def get_node(node_id: str) -> Optional[dict]:
             if not row:
                 return None
             (rid, kind, content, sp, ss, meta, created, last_access,
-             ac, stab) = row
+             ac, stab, media_ref, media_type, preview_b64) = row
             return {
                 "id": str(rid),
                 "kind": kind,
@@ -161,6 +161,9 @@ async def get_node(node_id: str) -> Optional[dict]:
                 "last_access_at": last_access.isoformat() if last_access else None,
                 "access_count": int(ac),
                 "stability": float(stab),
+                "media_ref": media_ref,
+                "media_type": media_type,
+                "preview_b64": preview_b64,
             }
 
 

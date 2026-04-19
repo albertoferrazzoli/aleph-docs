@@ -763,3 +763,11 @@ kbd {
 }
 .rp-audit-ts { color: var(--fg-faint); }
 .rp-audit-actor { color: var(--fg-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* ============================================================
+   Multimodal media renderers (right panel)
+   ============================================================ */
+.rp-media { width: 100%; max-height: 360px; border-radius: var(--radius-sm); background:#000; margin-bottom: 8px; }
+.rp-audio { display: flex; flex-direction: column; gap: 4px; }
+.rp-pdf   { display: flex; flex-direction: column; gap: 8px; }
+.rp-pdf img { border: 1px solid var(--border); }
