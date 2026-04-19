@@ -27,6 +27,12 @@ services:
       POSTGRES_PASSWORD: ${PG_PASSWORD:-aleph_dev_password_change_me}
     volumes:
       - db_data:/var/lib/postgresql/data
+      # Init scripts run in lexical order. 01 = extensions + grants,
+      # 02 = MCP memory schema, 03 = Aleph graph_snapshot + triggers.
+      - ./docker/init-db.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+      - ./mcp/memory/schema.sql:/docker-entrypoint-initdb.d/02-memory.sql:ro
+      - ./aleph/backend/schema_additions.sql:/docker-entrypoint-initdb.d/03-aleph.sql:ro
+      - ./aleph/backend/triggers.sql:/docker-entrypoint-initdb.d/04-triggers.sql:ro
     healthcheck:
       test: ["CMD", "pg_isready", "-U", "${PG_USER:-aleph}", "-d", "${PG_DB:-aleph_memory}"]
       interval: 5s

@@ -10,6 +10,7 @@ so the Docker image doesn't need Apache/nginx sidecars.
 """
 
 import os
+import sys
 from pathlib import Path
 
 import uvicorn
@@ -18,16 +19,47 @@ from fastapi.responses import RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from main import app as api_app  # existing Aleph FastAPI app
+# The Aleph backend uses relative imports (`from . import db, mcp_bridge`)
+# so it must be loaded as a proper package. Adding `/app/aleph/` to
+# sys.path makes `backend.main` resolvable.
+_aleph_root = Path("/app/aleph").resolve()
+if str(_aleph_root) not in sys.path:
+    sys.path.insert(0, str(_aleph_root))
+
+from backend.main import app as api_app  # existing Aleph FastAPI app
+
+# Also prepare memory package for a shared init_pool. Mounted sub-app
+# lifespans are not always invoked by Starlette when wrapped, so we
+# init the pool at the root level to guarantee it.
+sys.path.insert(0, "/app/mcp")
+from memory import db as memory_db  # noqa: E402
 
 FRONTEND_DIST = Path(os.environ.get("ALEPH_FRONTEND_DIST", "/app/aleph/frontend/dist"))
 HOST = os.environ.get("ALEPH_HOST", "0.0.0.0")
 PORT = int(os.environ.get("ALEPH_PORT", "8765"))
 
 
+from contextlib import asynccontextmanager
+
+
+@asynccontextmanager
+async def root_lifespan(_app):
+    try:
+        await memory_db.init_pool()
+    except Exception as e:
+        import logging
+        logging.getLogger("aleph").warning("[aleph] pool init failed: %s", e)
+    yield
+    try:
+        await memory_db.close_pool()
+    except Exception:
+        pass
+
+
 root = FastAPI(
     title="aleph-docs (docker)",
     description="Root wrapper: serves the Aleph frontend and proxies /aleph/api to the backend.",
+    lifespan=root_lifespan,
 )
 
 
