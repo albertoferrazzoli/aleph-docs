@@ -1,20 +1,113 @@
 # Aleph Docs
 
-**A reusable template for a documentation-aware LLM knowledge system.**
+**A reusable template for a documentation-aware LLM knowledge system that learns from use.**
 
-This repository provides everything you need to stand up, for any product,
-a stack that combines:
+## What this is
 
-1. A **MCP server** that indexes a Markdown documentation repo and exposes
-   lexical search (SQLite FTS5) + semantic search (PostgreSQL + pgvector)
-   + Gemini embeddings + Ebbinghaus forgetting curve + audit trail + lint.
-2. **Aleph**, a 3D web viewer for the semantic memory graph (Vite + React +
-   Three.js), with live updates via Postgres LISTEN/NOTIFY.
+Aleph Docs turns any Markdown documentation repository into a **living
+knowledge system** that an LLM (Claude, ChatGPT, local models via MCP)
+can both *read* and *write*. It gives you, out of the box:
 
-Together they implement an **operational knowledge system** that competes
-feature-for-feature with the LLM-Wiki pattern (e.g. Karpathy's design) while
-being cheaper at scale thanks to pgvector retrieval, auto-reinforcement and
-forgetting-curve decay.
+- **One MCP server** that indexes your docs repo and exposes it to any
+  LLM via the [Model Context Protocol](https://modelcontextprotocol.io/).
+  Every call to a search tool implicitly accumulates context for future
+  calls; every answer can be grounded and cited back to a line of Markdown.
+- **One 3D web viewer** (*Aleph*) that shows the evolving knowledge graph
+  in real time — so humans can inspect, curate, and navigate the memory
+  with the same model the LLM is using.
+- **A closed feedback loop** between the LLM interactions and the
+  canonical Markdown repo: insights captured during support sessions can
+  be promoted to pull requests on the docs repo with a single tool call.
+
+In one sentence: **git-tracked docs become queryable, writeable, and
+self-maintaining**, with costs measured in cents per year instead of
+dollars per month.
+
+## What problem it solves
+
+Most teams who want "an LLM that knows our product" end up building
+some variant of plain **RAG** (retrieve-chunks, stuff-into-prompt) or a
+**Karpathy-style LLM-Wiki** (have the LLM generate and maintain
+Markdown pages manually). Both patterns have known failure modes:
+
+- Plain RAG is **stateless**. Every query rediscovers knowledge from
+  scratch. Insights surfaced in one conversation don't enrich the next.
+  The system never learns what's important vs. noise.
+- LLM-Wiki is **expensive and slow**. Every write involves the LLM
+  rereading pages, reconciling them, rewriting chunks. At scale, the
+  token bill grows linearly with knowledge base activity.
+
+Aleph Docs takes the best of both and removes the costly parts:
+
+- It keeps Karpathy's *human-readable canonical source of truth* — the
+  Markdown git repo. Git history is your audit log for "normative" facts.
+- It adds an *operational fast layer* — a pgvector index with an
+  Ebbinghaus-style forgetting curve — where interactions reinforce
+  themselves, duplicates collapse automatically, and useless noise fades.
+- It only calls the LLM where an LLM is strictly necessary (contradiction
+  detection). Everything else — search, dedup, orphan detection,
+  staleness — is plain SQL.
+
+The result is a system that **gets smarter the more you use it**, costs
+a few cents a year to maintain, and never loses the audit trail.
+
+## Who it's for
+
+- Customer support teams who want their knowledge base to accumulate
+  customer-specific gotchas and workarounds without drift.
+- Engineering docs owners who want "the docs" to include both the
+  pristine prose in git *and* the field-tested knowledge from support.
+- LLM-agent builders who need a fast, cost-predictable retrieval layer
+  with proper write semantics (not just a vector-DB wrapper).
+- Anyone who has tried "let the LLM maintain the wiki" and hit the
+  token bill wall.
+
+---
+
+## Aleph Docs vs alternatives
+
+| Dimension | **Plain RAG** (vector DB + prompt stuffing) | **LLM-Wiki** (Karpathy + Obsidian) | **Aleph Docs** (this) |
+|---|---|---|---|
+| **State across sessions** | None — stateless | Markdown files persist, curated by LLM | Vector memory + git Markdown, both tracked |
+| **Retrieval latency** | Sub-200ms (vector only) | Multi-second (LLM rereads pages) | Sub-200ms (pgvector HNSW) |
+| **Write cost per entry** | N/A (read-only) | High — LLM rewrites pages | ~$0.0005 (embedding only) |
+| **Dedup** | None; same content re-indexed repeatedly | Up to the LLM to notice | Automatic: sim > 0.9 → reinforce instead of insert |
+| **Freshness / decay** | None | None (files never decay) | Built-in: Ebbinghaus forgetting curve per row |
+| **Contradictions** | Invisible — both hits rank equally | LLM lint finds them by rereading pages | Cheap SQL to find candidates, LLM judges only the top 20 |
+| **Audit trail** | At best, vector-DB row history | `git blame` on `.md` files | Both: `memory_audit` table + git log of canonical repo |
+| **Serendipity** (find unexpected connections) | Weak — similarity lost in prompt | Limited to explicit wikilinks | UMAP 3D projection surfaces latent clusters |
+| **Visualization** | None (vectors aren't human-readable) | Obsidian 2D graph (explicit links only) | Real-time 3D viewer with decay, live writes, audit history |
+| **Loop back to canonical docs** | None | Manual rewriting | `propose_doc_patch(open_pr=true)` opens a PR automatically |
+| **Offline / local** | Easy (any local vector DB) | Easy (any local LLM + files) | Requires Postgres + Gemini (swappable for local embeddings) |
+| **Predictable cost** | Low and flat | Grows with knowledge base size | Capped: SQL-free for most work, LLM budget hard-limited |
+| **Typical yearly cost** | Embedding only | $10–$100s depending on LLM usage | $0.12 bootstrap + ~$0.06/year lint |
+
+### Why not just plain RAG?
+
+- **Memory evolution** — RAG doesn't remember that a user corrected it yesterday. Aleph Docs auto-records every search as an `interaction` memory, dedups by semantic similarity, reinforces what's actually useful, and decays what isn't touched.
+- **Writable** — `remember(content, context)` stores a new insight in one call, addressable by UUID, retrievable by future semantic searches. Plain RAG has no write path; you re-run an indexing job and hope it picks things up.
+- **Citation quality** — every answer can cite a concrete `source_path` (for docs) or a memory UUID (for insights), with an audit trail for each. RAG typically retrieves an opaque chunk with no provenance.
+
+### Why not just LLM-Wiki + Obsidian?
+
+- **Scale** — LLM-Wiki ingestion costs grow linearly with every new source. Aleph Docs ingests docs via deterministic chunking + embedding (no LLM in the loop), so bootstrap of thousands of pages is a few cents.
+- **Write latency** — Saving a Markdown page via an LLM takes seconds. `remember()` returns in <1s regardless of how busy the LLM is.
+- **No LLM-generated drift** — LLM-Wiki pages drift as the LLM rewrites them to reconcile new sources. Aleph Docs keeps canonical docs 100% human-edited (git-tracked); the LLM only proposes PRs — you merge them with human review.
+- **Machine-queryable** — vector search is O(log N) with HNSW; "the LLM greps the wiki" is O(N token reads). At 10k+ memories, the difference is order-of-magnitude.
+
+### What Aleph Docs keeps from each
+
+- From **RAG**: sub-200ms vector retrieval, HNSW index, Gemini embeddings, cheap writes.
+- From **LLM-Wiki**: Markdown files in git as the canonical source, PR review workflow, audit via `git log`, human-readable knowledge layer that survives vector DB resets.
+- Added on top: forgetting curve, dedup, auto-reinforcement, visual graph, lint, explicit write/forget semantics, single-tool PR workflow back to canonical docs.
+
+### When it's probably **not** the right tool
+
+- You have **fewer than ~50 documents** total and prefer a plain wiki. Aleph's pgvector infrastructure is overkill.
+- You need **fully offline / air-gapped**. The default stack uses Gemini for embeddings; swap to a local model (Ollama + BGE-M3) works but is not the default path.
+- You don't have **any canonical docs** to index. Aleph assumes there's a git repo of Markdown to ground answers; if you only have scattered notes, adopt a minimal docs layout first.
+
+---
 
 > **Starting a new deployment?** Follow [`SETUP.md`](SETUP.md) — it's
 > written as an AI-coder runbook, step by step, from a blank VM to a
