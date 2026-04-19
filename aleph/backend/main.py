@@ -395,15 +395,19 @@ async def get_media(memory_id: str, request: Request) -> FileResponse:
     # Special case: PDF-extracted image nodes have media_ref like
     # `/foo.pdf#page=3&img=2` but media_type='image/png'. Re-extract the
     # embedded raster on demand so we don't need persistent storage.
+    # IMPORTANT: pypdfium2 PdfObject holds refs into the parent page;
+    # closing the page before extracting the bitmap segfaults. Extract
+    # INSIDE the open-page block.
     import re as _re
     if (media_type or "").startswith("image/") and "#page=" in media_ref and "img=" in media_ref:
         m = _re.search(r"#page=(\d+)(?:&img=(\d+))?", media_ref)
         if m and m.group(2):
             page_n = int(m.group(1))
             img_n = int(m.group(2))
+            import io as _io
+            png_bytes: bytes | None = None
             try:
                 import pypdfium2 as pdfium
-                import io as _io
                 pdf = pdfium.PdfDocument(str(resolved))
                 try:
                     page = pdf[page_n - 1]
@@ -412,16 +416,15 @@ async def get_media(memory_id: str, request: Request) -> FileResponse:
                             filter=(pdfium.raw.FPDF_PAGEOBJ_IMAGE,),
                             max_depth=5,
                         ))
+                        if img_n < 1 or img_n > len(imgs):
+                            raise HTTPException(status_code=404, detail="image index out of range")
+                        # Extract WHILE page is still open.
+                        pil = imgs[img_n - 1].get_bitmap().to_pil()
+                        buf = _io.BytesIO()
+                        pil.save(buf, format="PNG", optimize=True)
+                        png_bytes = buf.getvalue()
                     finally:
                         page.close()
-                    if img_n < 1 or img_n > len(imgs):
-                        raise HTTPException(status_code=404, detail="image index out of range")
-                    pil = imgs[img_n - 1].get_bitmap().to_pil()
-                    buf = _io.BytesIO()
-                    pil.save(buf, format="PNG", optimize=True)
-                    buf.seek(0)
-                    from starlette.responses import StreamingResponse
-                    return StreamingResponse(buf, media_type="image/png")
                 finally:
                     pdf.close()
             except HTTPException:
@@ -429,6 +432,9 @@ async def get_media(memory_id: str, request: Request) -> FileResponse:
             except Exception as e:
                 log.warning("[aleph] /media/%s pdf image extract failed: %s", memory_id, e)
                 raise HTTPException(status_code=500, detail="pdf image extract error")
+            if png_bytes is not None:
+                from starlette.responses import Response
+                return Response(content=png_bytes, media_type="image/png")
 
     mt = media_type or "application/octet-stream"
     return FileResponse(str(resolved), media_type=mt, filename=resolved.name)
