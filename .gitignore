@@ -33,6 +33,17 @@ data/
 *.sqlite
 *.sqlite3
 
+# User documentation content — the ./docs/ folder is bind-mounted
+# into containers at runtime. Only the template placeholders
+# (README.md + guides/getting-started.md) ship with the repo;
+# everything else is user-owned and must not be committed.
+docs/*
+!docs/README.md
+!docs/guides/
+docs/guides/*
+!docs/guides/getting-started.md
+.DS_Store
+
 # Logs + backups
 *.log
 *.bak
