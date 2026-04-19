@@ -195,12 +195,31 @@ aleph-docs/
 
 ---
 
+## Where do your docs live?
+
+Aleph Docs supports two modes — switch between them just by setting (or
+leaving empty) the `DOCS_REPO_URL` env var:
+
+| Mode | When to use | Source of docs |
+|---|---|---|
+| **Local** (default) | Solo devs, small teams, "just works" out of the box | The `./docs/` folder of this repo (commit your markdown alongside the app) |
+| **Remote git repo** | Larger teams, docs have their own review cycle | Any GitHub repo — the indexer clones + pulls with a PAT |
+
+In both modes the hourly `indexer.py --update` job picks up changes
+incrementally; in remote mode it uses `git diff`, in local mode it uses
+file mtimes. No code changes, just env flipping.
+
+Drop a couple of `.md` files in `./docs/` and you can run the MCP without
+a remote repo at all. See [`docs/README.md`](docs/README.md).
+
+---
+
 ## Quick start (local, 10 minutes)
 
 1. **Prereqs**
    - macOS / Linux with Python 3.11+, Node 20+, PostgreSQL 16+, pgvector.
-   - A GitHub repo with your documentation in Markdown under `content/`.
    - A Gemini API key (free tier works for bootstrap at scale).
+   - **Optionally**, a GitHub repo with your docs — or just use `./docs/`.
 
 2. **Clone + configure**
    ```bash

@@ -45,12 +45,30 @@ def set_memory_hook(enabled: bool) -> None:
     ENABLE_MEMORY_HOOK = bool(enabled) and _memory_chunker is not None
 
 
-REPO_URL = os.environ.get("DOCS_REPO_URL", "https://github.com/<DOCS_REPO_SLUG>.git")
+REPO_URL = os.environ.get("DOCS_REPO_URL", "").strip()
 REPO_BRANCH = os.environ.get("DOCS_REPO_BRANCH", "main")
 REPO_PATH = Path(os.environ.get("DOCS_REPO_PATH", "repo")).resolve()
 DB_PATH = Path(os.environ.get("DOCS_DB_PATH", "data/index.db")).resolve()
 
-CONTENT_SUBDIR = "content"
+# Local docs directory. When DOCS_REPO_URL is empty, the indexer reads from
+# this path instead of cloning a git repo. Default is `./docs` sibling to
+# the MCP, so a fresh checkout of this template is immediately usable.
+_default_local = Path(__file__).resolve().parent.parent / "docs"
+LOCAL_DOCS_PATH = Path(os.environ.get("LOCAL_DOCS_PATH", str(_default_local))).resolve()
+
+# Effective source mode: "git" when DOCS_REPO_URL is set, else "local".
+DOCS_MODE = "git" if REPO_URL else "local"
+
+# In local mode, the content root is LOCAL_DOCS_PATH itself (no clone step).
+if DOCS_MODE == "local":
+    REPO_PATH = LOCAL_DOCS_PATH
+
+# Name of the subdirectory inside the docs root that contains the .md/.mdx
+# files. Nextra / Docusaurus conventionally use "content"; a plain ./docs
+# folder does not. We therefore default to "content" in git mode and "" in
+# local mode. Override via the CONTENT_SUBDIR env var to force either.
+_default_subdir = "content" if DOCS_MODE == "git" else ""
+CONTENT_SUBDIR = os.environ.get("CONTENT_SUBDIR", _default_subdir)
 
 
 # ---------------------------------------------------------------------------
@@ -76,7 +94,15 @@ def _auth_url(url: str) -> str:
 
 
 def ensure_repo() -> Path:
-    """Clone repo if missing, else pull latest."""
+    """Ensure the docs source is available locally.
+
+    - DOCS_MODE='git':   clone if missing, else git fetch + reset HEAD.
+    - DOCS_MODE='local': just verify LOCAL_DOCS_PATH exists (create if not).
+    """
+    if DOCS_MODE == "local":
+        REPO_PATH.mkdir(parents=True, exist_ok=True)
+        return REPO_PATH
+
     clone_url = _auth_url(REPO_URL)
     env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
     if not REPO_PATH.exists():
@@ -101,10 +127,27 @@ def ensure_repo() -> Path:
 
 
 def current_commit() -> str:
+    """Return the current HEAD sha, or an fs-mtime digest in local mode."""
+    if DOCS_MODE == "local":
+        # In local mode we don't have git metadata. Return a hash of the
+        # max mtime across all files so incremental_update can still detect
+        # changes. Gracefully degrades to "" if the dir is empty.
+        import hashlib
+        h = hashlib.sha256()
+        for p in sorted(REPO_PATH.rglob("*")):
+            if p.is_file() and p.suffix.lower() in (".md", ".mdx"):
+                try:
+                    h.update(f"{p}:{p.stat().st_mtime_ns}".encode())
+                except Exception:
+                    pass
+        return h.hexdigest()[:16]
     return _run(["git", "-C", str(REPO_PATH), "rev-parse", "HEAD"])
 
 
 def git_log(since_commit: str | None = None, limit: int = 20) -> list[dict]:
+    # In local mode there's no git history to show.
+    if DOCS_MODE == "local":
+        return []
     fmt = "%H%x09%ai%x09%an%x09%s"
     args = ["git", "-C", str(REPO_PATH), "log", f"-n{limit}", f"--pretty=format:{fmt}"]
     if since_commit:
@@ -277,9 +320,13 @@ def get_meta(conn, key: str) -> str | None:
 # ---------------------------------------------------------------------------
 
 def iter_doc_files(repo_root: Path):
-    content_dir = repo_root / CONTENT_SUBDIR
+    # If CONTENT_SUBDIR is empty, the repo_root itself holds the markdown.
+    content_dir = repo_root / CONTENT_SUBDIR if CONTENT_SUBDIR else repo_root
     if not content_dir.is_dir():
-        raise RuntimeError(f"content/ not found in repo: {content_dir}")
+        raise RuntimeError(
+            f"Docs content directory not found: {content_dir}. "
+            f"Create it or set LOCAL_DOCS_PATH / CONTENT_SUBDIR accordingly."
+        )
     for p in content_dir.rglob("*"):
         if p.is_file() and p.suffix.lower() in (".md", ".mdx"):
             yield p
@@ -397,6 +444,13 @@ def incremental_update(conn):
     new_hash = current_commit()
     if prev_hash == new_hash:
         return (0, 0, 0)
+
+    # In local mode we don't have git diff; do a full rebuild (cheap since
+    # upsert_page is idempotent and mtime-sensitive). This also catches
+    # deletions naturally.
+    if DOCS_MODE == "local":
+        count = rebuild(conn)
+        return (count, 0, 0)
 
     # Determine changed files from git diff
     diff_out = _run(
