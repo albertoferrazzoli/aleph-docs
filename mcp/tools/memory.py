@@ -186,26 +186,38 @@ def register(mcp):
             if not hits:
                 return [f'no visual hits for "{query}" above score {min_score}']
 
-            out: list = []
-            summary_lines = [f'top {len(hits)} visual hits for "{query}":']
+            # Response shape: markdown text (renders as <img> in Claude
+            # Desktop) PLUS native MCP Image blocks (for clients that
+            # render those — Claude Code, MCP Inspector, etc).
+            #
+            # Why both: as of late 2026 Claude Desktop passes MCP image
+            # blocks to the model but does NOT render them visually in
+            # the chat thread. Markdown data URIs render reliably.
+            md_lines = [f'## top {len(hits)} visual hits for "{query}"', ""]
+            image_blocks: list = []
             for i, h in enumerate(hits, 1):
                 mid = h.get("id")
                 score = h.get("score", 0)
                 kind = h.get("kind", "?")
                 src = h.get("source_path") or h.get("media_ref") or "?"
-                summary_lines.append(
-                    f"  {i}. {kind:12s} score={score:.3f}  {src}"
-                )
                 data, mime, _ = await _fetch_preview(mid)
+                header = f"**{i}.** `{kind}` · score `{score:.3f}` · `{src}` · id `{mid}`"
                 if data:
-                    # Format hint: the preview thumbnailer emits JPEG bytes
-                    # behind a base64; infer format from the mime or default.
-                    fmt = "jpeg"
-                    if (mime or "").endswith("png") or (mime or "") == "image/png":
-                        fmt = "png"
-                    out.append(Image(data=data, format=fmt))
-            out.insert(0, "\n".join(summary_lines))
-            return out
+                    # preview_b64 is ALWAYS a JPEG thumbnail produced by
+                    # media.make_image_thumbnail; the `mime` returned here
+                    # describes the SOURCE media (could be application/pdf)
+                    # so we must force image/jpeg for the data URI.
+                    preview_mime = "image/jpeg"
+                    import base64 as _b64
+                    b64 = _b64.b64encode(data).decode()
+                    md_lines.append(header)
+                    md_lines.append(f"![hit {i}](data:{preview_mime};base64,{b64})")
+                    md_lines.append("")
+                    image_blocks.append(Image(data=data, format="jpeg"))
+                else:
+                    md_lines.append(header + " *(no preview)*")
+                    md_lines.append("")
+            return ["\n".join(md_lines), *image_blocks]
         except db.MemoryDisabled:
             return ["error: semantic memory is disabled"]
         except Exception as e:
@@ -262,11 +274,22 @@ def register(mcp):
                 return [
                     f"memory {memory_id} has no preview (kind={meta.get('kind')})"
                 ]
-            fmt = "png" if (mime or "").endswith("png") else "jpeg"
-            return [
-                f"memory {memory_id} ({meta.get('kind')}): {meta.get('source_path') or meta.get('media_ref') or ''}",
-                Image(data=data, format=fmt),
-            ]
+            # In full-res path `mime` is image/png (PDF re-extract);
+            # in thumbnail path it's the SOURCE media_type (could be
+            # application/pdf) but the bytes are a JPEG thumbnail.
+            if full_res and mime == "image/png":
+                preview_mime, fmt = "image/png", "png"
+            else:
+                preview_mime, fmt = "image/jpeg", "jpeg"
+            import base64 as _b64
+            b64 = _b64.b64encode(data).decode()
+            md = (
+                f"**memory** `{memory_id}`  "
+                f"`{meta.get('kind')}`  "
+                f"`{meta.get('source_path') or meta.get('media_ref') or ''}`"
+                f"\n\n![{meta.get('kind')}](data:{preview_mime};base64,{b64})"
+            )
+            return [md, Image(data=data, format=fmt)]
         except db.MemoryDisabled:
             return ["error: semantic memory is disabled"]
         except Exception as e:
