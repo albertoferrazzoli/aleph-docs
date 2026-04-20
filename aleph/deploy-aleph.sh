@@ -320,7 +320,11 @@ gcloud compute ssh "$PROD_VM" --zone="$PROD_ZONE" --project="$PROD_PROJECT" --co
     upsert_env ALEPH_API_KEY   '$ALEPH_API_KEY_VAL'
     upsert_env MEMORY_ENABLED  'true'
     upsert_env MCP_PATH        '$MCP_REMOTE_PATH'
-    upsert_env EMBED_MODEL     'gemini-embedding-001'
+    # EMBED_BACKEND must match the backend used by the MCP indexer —
+    # query vectors and stored vectors must live in the same latent space.
+    # Default to gemini-2-preview (multimodal); override via env if the MCP
+    # side was bootstrapped with a text-only backend.
+    upsert_env EMBED_BACKEND   "${EMBED_BACKEND_FROM_MCP:-gemini-2-preview}"
     upsert_env EMBED_DIM       '1536'
     upsert_env LOG_LEVEL       'INFO'
     upsert_env ALEPH_HOST      '127.0.0.1'
