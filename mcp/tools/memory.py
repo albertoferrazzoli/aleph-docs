@@ -2,6 +2,7 @@
 
 import base64
 import logging
+import os
 
 from pathlib import Path
 
@@ -452,7 +453,8 @@ def register(mcp):
         Algorithm (PRD 3.6):
         1) Fetch top-k insights+interactions matching `topic` (score > 0.3).
         2) Fetch top-k doc_chunks; aggregate score per source_path; pick best.
-        3) Compose a '## Note dal supporto (auto-suggerite)' block listing the
+        3) Compose a '## Notes from support (auto-suggested)' block (override
+           via DOC_PATCH_HEADING env to match the docs' language) listing the
            insights with stability/access_count annotation.
         4) Return a structured suggestion. NO automatic PR.
 
@@ -483,7 +485,8 @@ def register(mcp):
             target_path = max(agg, key=agg.get) if agg else None
             target_section = section_of.get(target_path or "", "")
 
-            lines = ["## Note dal supporto (auto-suggerite)", ""]
+            heading = os.environ.get("DOC_PATCH_HEADING", "## Notes from support (auto-suggested)")
+            lines = [heading, ""]
             for m in supporting:
                 c = (m.get("content") or "").replace("\n", " ").strip()
                 s = m.get("stability", 0.0)
@@ -573,7 +576,8 @@ def register(mcp):
                                 else "confidence below 0.3"),
                 }
 
-            lines = ["## Note dal supporto (auto-suggerite)", ""]
+            heading = os.environ.get("DOC_PATCH_HEADING", "## Notes from support (auto-suggested)")
+            lines = [heading, ""]
             for m in supporting:
                 c = (m.get("content") or "").replace("\n", " ").strip()
                 s = m.get("stability", 0.0)

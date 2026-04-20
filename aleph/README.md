@@ -195,7 +195,8 @@ propose_doc_patch(topic="floating license revocation", top_k=8, open_pr=true)
 This:
 1. Gathers the top insights / interactions on that topic.
 2. Picks the best target `.md` in `<DOCS_REPO_NAME>` by vector similarity.
-3. Appends a *"Note dal supporto (auto-suggerite)"* block after the matching H2.
+3. Appends a *"Notes from support (auto-suggested)"* block (override heading
+   via `DOC_PATCH_HEADING` env) after the matching H2.
 4. Creates a branch `docs/mcp-<slug>-<YYYYMMDD-HHMM>`, commits, pushes.
 5. Opens a GitHub PR at `<DOCS_REPO_SLUG>`.
 

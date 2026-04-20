@@ -82,7 +82,7 @@ def test_apply_patch_happy_path(fake_repo):
     from memory.doc_patch import apply_patch
 
     block = (
-        "## Note dal supporto (auto-suggerite)\n\n"
+        "## Notes from support (auto-suggested)\n\n"
         "- Customer-X hit a race condition _(stability: 1.2, access_count: 3)_\n"
     )
     res = apply_patch(
@@ -103,9 +103,9 @@ def test_apply_patch_happy_path(fake_repo):
 
     # Verify file was modified — block inserted before "## Configuration"
     md = (fake_repo / "content" / "guides" / "example.md").read_text()
-    assert "Note dal supporto" in md
+    assert "Notes from support" in md
     # Order: Overview section → new block → Configuration
-    assert md.index("Overview") < md.index("Note dal supporto") < md.index("Configuration")
+    assert md.index("Overview") < md.index("Notes from support") < md.index("Configuration")
 
 
 def test_apply_patch_dirty_repo(fake_repo):

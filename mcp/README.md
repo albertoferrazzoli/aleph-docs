@@ -33,7 +33,8 @@ ready-to-review git commit on the canonical docs repo (`<DOCS_REPO_NAME>`).
 
 1. You call `propose_doc_patch(topic="...")` from Claude.
 2. The server picks the best target file under `content/`, builds a
-   `## Note dal supporto (auto-suggerite)` block, creates a local branch
+   `## Notes from support (auto-suggested)` block (override via
+   `DOC_PATCH_HEADING` env to match the docs' language), creates a local branch
    `docs/mcp-<slug>-<YYYYMMDD-HHMM>` in the clone, inserts the block after the
    relevant H2 (or at EOF), and commits. **It does not push.**
 3. Review on the VM:
