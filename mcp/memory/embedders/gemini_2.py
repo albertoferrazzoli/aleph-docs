@@ -108,7 +108,16 @@ class GeminiMultimodalBackend:
             return []
         guard_out_dim(self.name, self.native_dim, out_dim)
         parts = [_to_part(it, i) for i, it in enumerate(items)]
-        return await self._embed_with_retry(parts, out_dim)
+        # gemini-embedding-2-preview returns only 1 vector per API call
+        # regardless of how many contents are sent — iterate one-by-one.
+        vectors: List[List[float]] = []
+        for p in parts:
+            got = await self._embed_with_retry([p], out_dim)
+            if not got:
+                vectors.append([])
+            else:
+                vectors.append(got[0])
+        return vectors
 
     @retry(
         retry=retry_if_exception_type(Exception),

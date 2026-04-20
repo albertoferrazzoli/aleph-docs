@@ -429,6 +429,23 @@ def register(mcp):
             return error_response(e)
 
     @mcp.tool()
+    async def memory_stats() -> dict:
+        """Return exact counts of memory rows by kind.
+
+        Use this when the user asks how many memories / docs / images / etc.
+        are stored. `semantic_search` is capped at 50 results and doesn't
+        expose totals — this tool queries the underlying table directly.
+        """
+        try:
+            counts = await store.count_by_kind()
+            total = sum(v for v in counts.values() if isinstance(v, int))
+            return {"counts": counts, "total": total}
+        except db.MemoryDisabled:
+            return {"error": "semantic memory is disabled"}
+        except Exception as e:
+            return error_response(e)
+
+    @mcp.tool()
     async def suggest_doc_update(topic: str, top_k: int = 8) -> dict:
         """Propose a markdown patch to the canonical docs based on stored memory.
 

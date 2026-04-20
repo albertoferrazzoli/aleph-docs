@@ -48,7 +48,7 @@ WITH pairs AS (
     LIMIT 6
   ) b
 )
-SELECT a_id, b_id, w FROM pairs WHERE w > 0.4
+SELECT a_id, b_id, w FROM pairs WHERE w > 0.25
 """
 
 
