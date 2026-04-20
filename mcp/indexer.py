@@ -38,6 +38,84 @@ ENABLE_MEMORY_HOOK = (
 )
 
 _pending_embeds: list[tuple[str, list, int]] = []
+# For md-image indexing: (rel_md_path, [(abs_image_path, alt_text)])
+_pending_images: list[tuple[str, list[tuple[Path, str]]]] = []
+
+
+# --- Markdown-referenced image walker -------------------------------------
+
+_MD_IMG_RE = re.compile(r"!\[([^\]]*)\]\(([^)]+?)\)")
+_HTML_IMG_RE = re.compile(r'<img\b([^>]*)>', re.IGNORECASE)
+_HTML_ATTR_RE = re.compile(
+    r'''(\w+)\s*=\s*(?:"([^"]*)"|'([^']*)')''', re.IGNORECASE
+)
+_IMG_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+
+
+def _resolve_image_path(
+    url: str, md_dir: Path, repo_root: Path, public_root: Path
+) -> Path | None:
+    if url.startswith(("http://", "https://", "data:", "#", "mailto:")):
+        return None
+    # Strip query / fragment
+    url = url.split("#", 1)[0].split("?", 1)[0]
+    if not url:
+        return None
+    if url.startswith("/"):
+        # Absolute URL — Nextra convention: try public/ first, then repo root.
+        cand = (public_root / url.lstrip("/")).resolve()
+        if cand.is_file():
+            return cand
+        cand = (repo_root / url.lstrip("/")).resolve()
+        return cand if cand.is_file() else None
+    # Relative to the MD file.
+    cand = (md_dir / url).resolve()
+    # Safety: must stay under repo_root.
+    try:
+        cand.relative_to(repo_root.resolve())
+    except ValueError:
+        return None
+    return cand if cand.is_file() else None
+
+
+def _extract_image_refs(
+    body: str, md_path: Path, repo_root: Path
+) -> list[tuple[Path, str]]:
+    """Return [(absolute_image_path, alt_text)] for every inline image
+    reference in `body`. Resolves relative paths against the MD file
+    and absolute paths (starting with /) against the repo's content
+    root (Nextra convention: /images/x.png means public/x.png or
+    <repo>/images/x.png). Skips external URLs, data URIs, and
+    non-image extensions.
+    """
+    seen_paths: set[Path] = set()
+    refs: list[tuple[Path, str]] = []
+    md_dir = md_path.parent
+    public_root = repo_root / "public"
+    for m in _MD_IMG_RE.finditer(body):
+        alt, url = m.group(1).strip(), m.group(2).strip()
+        # Strip markdown title after URL:  ![alt](url "title")
+        url = url.split(" ", 1)[0]
+        p = _resolve_image_path(url, md_dir, repo_root, public_root)
+        if p and p.suffix.lower() in _IMG_EXTS and p not in seen_paths:
+            seen_paths.add(p)
+            refs.append((p, alt))
+    for m in _HTML_IMG_RE.finditer(body):
+        attrs_blob = m.group(1)
+        attrs: dict[str, str] = {}
+        for am in _HTML_ATTR_RE.finditer(attrs_blob):
+            k = am.group(1).lower()
+            v = am.group(2) if am.group(2) is not None else (am.group(3) or "")
+            attrs[k] = v
+        url = (attrs.get("src") or "").strip()
+        alt = (attrs.get("alt") or "").strip()
+        if not url:
+            continue
+        p = _resolve_image_path(url, md_dir, repo_root, public_root)
+        if p and p.suffix.lower() in _IMG_EXTS and p not in seen_paths:
+            seen_paths.add(p)
+            refs.append((p, alt))
+    return refs
 
 
 def set_memory_hook(enabled: bool) -> None:
@@ -375,11 +453,22 @@ def upsert_page(conn, rel_path: str, abs_path: Path):
             logging.getLogger("memory").warning(
                 "[memory] chunking %s failed: %s", rel_path, e
             )
+        # Markdown-referenced image collection — one image memory per
+        # ![alt](path) or <img src=…> found in the body. Resolved paths
+        # must live under REPO_PATH; external URLs are skipped.
+        try:
+            refs = _extract_image_refs(body, abs_path, REPO_PATH)
+            if refs:
+                _pending_images.append((rel_path, refs))
+        except Exception as e:
+            logging.getLogger("memory").warning(
+                "[memory] image-ref extraction %s failed: %s", rel_path, e
+            )
 
 
-async def _flush_memory(pending):
+async def _flush_memory(pending, pending_images=None):
     from memory import db, store
-    if not pending:
+    if not pending and not pending_images:
         return
     if not db.is_enabled():
         return
@@ -391,6 +480,40 @@ async def _flush_memory(pending):
             except Exception as e:
                 logging.getLogger("memory").warning(
                     "[memory] upsert %s failed: %s", rel, e
+                )
+        # Markdown-referenced images: one MediaChunk per image, idempotent
+        # via store.upsert_media_chunk's media_ref dedup. Requires an
+        # embedder backend with image modality (e.g. gemini-2-preview).
+        if pending_images:
+            try:
+                from memory.chunker_image import chunk_image
+                from memory.embedders import get_backend
+                backend = get_backend()
+                if "image" not in backend.modalities:
+                    logging.getLogger("memory").info(
+                        "[memory] skipping md-image indexing: backend %r "
+                        "has no image modality (set EMBED_BACKEND=gemini-2-preview)",
+                        backend.name,
+                    )
+                else:
+                    for rel_md, refs in pending_images:
+                        for abs_img, alt in refs:
+                            try:
+                                caption = alt or abs_img.stem
+                                chunk = chunk_image(abs_img, caption=caption)
+                                await store.upsert_media_chunk(
+                                    chunk,
+                                    actor="indexer:md-image",
+                                    context=f"from {rel_md}",
+                                )
+                            except Exception as e:
+                                logging.getLogger("memory").warning(
+                                    "[memory] md-image %s (from %s) failed: %s",
+                                    abs_img, rel_md, e,
+                                )
+            except Exception as e:
+                logging.getLogger("memory").warning(
+                    "[memory] md-image flush failed: %s", e
                 )
     finally:
         await db.close_pool()
@@ -413,6 +536,7 @@ async def _delete_all_doc_chunks():
 def rebuild(conn):
     """Drop all indexed data and rebuild from scratch."""
     _pending_embeds.clear()
+    _pending_images.clear()
     conn.executescript(
         "DELETE FROM pages; DELETE FROM pages_fts; "
         "DELETE FROM code_blocks; DELETE FROM code_blocks_fts;"
@@ -427,11 +551,13 @@ def rebuild(conn):
     set_meta(conn, "repo_url", REPO_URL)
     conn.commit()
 
-    if ENABLE_MEMORY_HOOK and _pending_embeds:
+    if ENABLE_MEMORY_HOOK and (_pending_embeds or _pending_images):
         pending = list(_pending_embeds)
+        pending_images = list(_pending_images)
         _pending_embeds.clear()
+        _pending_images.clear()
         try:
-            asyncio.run(_flush_memory(pending))
+            asyncio.run(_flush_memory(pending, pending_images))
         except Exception as e:
             logging.getLogger("memory").warning("[memory] flush failed: %s", e)
     return count
@@ -440,6 +566,7 @@ def rebuild(conn):
 def incremental_update(conn):
     """Pull latest and re-index changed files only. Returns (added, updated, removed)."""
     _pending_embeds.clear()
+    _pending_images.clear()
     prev_hash = get_meta(conn, "last_commit_hash")
     new_hash = current_commit()
     if prev_hash == new_hash:
@@ -497,11 +624,13 @@ def incremental_update(conn):
     set_meta(conn, "last_indexed_at", str(int(time.time())))
     conn.commit()
 
-    if ENABLE_MEMORY_HOOK and _pending_embeds:
+    if ENABLE_MEMORY_HOOK and (_pending_embeds or _pending_images):
         pending = list(_pending_embeds)
+        pending_images = list(_pending_images)
         _pending_embeds.clear()
+        _pending_images.clear()
         try:
-            asyncio.run(_flush_memory(pending))
+            asyncio.run(_flush_memory(pending, pending_images))
         except Exception as e:
             logging.getLogger("memory").warning("[memory] flush failed: %s", e)
     return (added, updated, removed)
