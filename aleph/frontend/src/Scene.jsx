@@ -235,7 +235,7 @@ export default function Scene(props) {
       const props = st.propsRef.current;
       const {
         nodes, positions, colorMode, sizeMode,
-        hoveredId, selectedId, highlightIds, dimmedIds, pulsePhases,
+        hoveredId, selectedId, highlightIds, hiddenIds, dimmedIds, pulsePhases,
       } = props;
 
       stars.visible = props.starfield !== false;
@@ -266,6 +266,7 @@ export default function Scene(props) {
       for (let i = 0; i < count; i++) {
         const n = nodes[i];
         const p = positions[i] || { x: 0, y: 0, z: 0 };
+        const isHidden = hiddenIds && hiddenIds.has(n.id);
         let s = sizeFor(n, sizeMode);
         const isHover = hoveredId === n.id;
         const isSel = selectedId === n.id;
@@ -275,25 +276,28 @@ export default function Scene(props) {
         else if (isHL) s *= 1.35;
         const pulse = pulsePhases && pulsePhases.get(n.id);
         if (pulse !== undefined) s *= 1 + 0.35 * Math.sin(t * 5 + pulse);
+        if (isHidden) s = 0;
 
         dummy.position.set(p.x, p.y, p.z);
         dummy.scale.setScalar(s);
         dummy.updateMatrix();
         nodesMesh.setMatrixAt(i, dummy.matrix);
 
-        dummy.scale.setScalar(s * 3.2 * (isHover || isSel ? 1.6 : 1));
+        dummy.scale.setScalar(isHidden ? 0 : s * 3.2 * (isHover || isSel ? 1.6 : 1));
         dummy.updateMatrix();
         halosMesh.setMatrixAt(i, dummy.matrix);
 
         const base = colorFor(n, colorMode);
         tmpColor.copy(base);
-        if (isDim) tmpColor.multiplyScalar(0.18);
+        if (isHidden) tmpColor.multiplyScalar(0);
+        else if (isDim) tmpColor.multiplyScalar(0.18);
         else if (isSel) tmpColor.multiplyScalar(1.4);
         else if (isHover) tmpColor.multiplyScalar(1.3);
         nodesMesh.setColorAt(i, tmpColor);
 
         tmpColor.copy(base);
-        if (isDim) tmpColor.multiplyScalar(0.05);
+        if (isHidden) tmpColor.multiplyScalar(0);
+        else if (isDim) tmpColor.multiplyScalar(0.05);
         halosMesh.setColorAt(i, tmpColor);
       }
       nodesMesh.instanceMatrix.needsUpdate = true;
@@ -310,6 +314,7 @@ export default function Scene(props) {
           const a = nodes[e.a], b = nodes[e.b];
           const pa = positions[e.a], pb = positions[e.b];
           if (!a || !b || !pa || !pb) continue;
+          if (hiddenIds && (hiddenIds.has(a.id) || hiddenIds.has(b.id))) continue;
           const isDim = dimmedIds && (dimmedIds.has(a.id) || dimmedIds.has(b.id));
           const isHLE = highlightEdges && highlightEdges.has(
             `${Math.min(e.a, e.b)}_${Math.max(e.a, e.b)}`,
@@ -362,7 +367,7 @@ export default function Scene(props) {
 
   useEffect(() => {
     if (stateRef.current) stateRef.current.edgesDirty = true;
-  }, [props.positions, props.edges, props.densityCutoff, props.dimmedIds, props.highlightEdges]);
+  }, [props.positions, props.edges, props.densityCutoff, props.dimmedIds, props.hiddenIds, props.highlightEdges]);
 
   useEffect(() => {
     if (stateRef.current.cam && props.zoomTarget) {
@@ -376,13 +381,14 @@ export default function Scene(props) {
     const positions = props.positions;
     const nodes = props.nodes;
     const dimmed = props.dimmedIds;
+    const hidden = props.hiddenIds;
     if (!positions || !positions.length) return;
 
-    // Pick visible (non-dimmed) positions; fall back to all.
+    // Pick visible (non-hidden, non-dimmed) positions; fall back to all.
     const visible = [];
     for (let i = 0; i < positions.length; i++) {
       const n = nodes[i];
-      if (!n || (dimmed && dimmed.has(n.id))) continue;
+      if (!n || (hidden && hidden.has(n.id)) || (dimmed && dimmed.has(n.id))) continue;
       visible.push(positions[i]);
     }
     const pts = visible.length > 0 ? visible : positions;

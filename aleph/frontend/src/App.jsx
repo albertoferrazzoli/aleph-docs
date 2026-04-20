@@ -263,7 +263,7 @@ export default function App() {
   const { highlightIds, dimmedIds, highlightEdges } = useMemo(() => {
     const hl = new Set();
     const hlE = new Set();
-    let dim = hiddenIds;
+    const dim = new Set();
     if (selectedId && selectedIdx >= 0) {
       hl.add(selectedId);
       const adj = adjacency[selectedIdx] || [];
@@ -273,13 +273,12 @@ export default function App() {
         hlE.add(`${Math.min(selectedIdx, j)}_${Math.max(selectedIdx, j)}`);
       }
       if (isolated) {
-        dim = new Set(hiddenIds);
         for (const n of nodes) if (!hl.has(n.id)) dim.add(n.id);
       }
     }
     if (results) for (const id of results.ids) hl.add(id);
     return { highlightIds: hl, dimmedIds: dim, highlightEdges: hlE };
-  }, [selectedId, selectedIdx, isolated, results, hiddenIds, adjacency, nodes]);
+  }, [selectedId, selectedIdx, isolated, results, adjacency, nodes]);
 
   const onQuery = useCallback(async (q) => {
     if (!q.trim()) { setResults(null); return; }
@@ -383,11 +382,11 @@ export default function App() {
   const hoveredNode = hoveredId ? nodes[idToIdx.get(hoveredId)] : null;
   const selectedNode = selectedId ? nodes[idToIdx.get(selectedId)] : null;
 
-  const sceneDim = useMemo(() => {
-    const s = new Set(dimmedIds);
+  const sceneHidden = useMemo(() => {
+    const s = new Set(hiddenIds);
     for (const n of nodes) if (n.decay === 0) s.add(n.id);
     return s;
-  }, [dimmedIds, nodes]);
+  }, [hiddenIds, nodes]);
 
   const onOpenSettings = useCallback(() => {
     const cur = getWriteKey();
@@ -467,7 +466,8 @@ export default function App() {
             hoveredId={hoveredId}
             selectedId={selectedId}
             highlightIds={highlightIds}
-            dimmedIds={sceneDim}
+            hiddenIds={sceneHidden}
+            dimmedIds={dimmedIds}
             highlightEdges={highlightEdges}
             densityCutoff={edgeCutoff}
             pulsePhases={results?.pulses}
