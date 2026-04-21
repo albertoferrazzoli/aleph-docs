@@ -10,40 +10,15 @@ except ImportError:
 
 
 def register(mcp):
-    @mcp.tool()
-    @record_interaction("search_docs")
-    def search_docs(query: str, section: str | None = None, limit: int = 10) -> dict:
-        """Keyword (lexical) search across MARKDOWN PAGES ONLY.
-
-        ⚠ SCOPE: This searches the `pages_fts` SQLite FTS5 index, which
-        covers *only* `.md`/`.mdx` files under `docs/`. It does NOT see
-        video transcripts, audio transcripts, PDF page text, or image
-        chunks — those live in the memories vector store and are
-        reachable only via `semantic_search` (text + multimodal) or
-        `search_images` (visual).
-
-        When to use THIS tool:
-          • the user asks for exact keywords / flag names in docs
-          • the user asks which markdown page documents X
-          • you need BM25-ranked prose snippets with highlights
-
-        When to use `semantic_search` INSTEAD:
-          • the corpus includes video courses, recorded meetings,
-            screencasts, audio notes, or PDFs (Whisper transcripts and
-            PDF page text are only indexed there)
-          • the user asks conceptual questions ("what does the
-            instructor say about X?", "summarize the course")
-          • you want results ranked by meaning, not token overlap
-
-        Returning zero or few hits here is a strong signal to retry
-        with `semantic_search` before telling the user the corpus is
-        empty — especially for course / tutorial content.
-
-        Args:
-            query: Search text. Multi-word queries are AND-combined.
-            section: Optional section filter ('guides', 'reference', 'api').
-            limit: Max number of results (default 10, max 50).
-        """
+    # NOTE: `search_docs` is intentionally NOT registered as an MCP
+    # tool. The unified `search` tool (see memory.py) is the single
+    # entry point for retrieval — semantic + multimodal in one pass —
+    # so models no longer have to choose between two overlapping
+    # surfaces. FTS5 keyword access remains reachable via the narrow
+    # lookup tools in lookup.py (find_command_line_option, etc.) which
+    # need exact-string matching the vector index cannot guarantee.
+    def _search_docs_fts(query: str, section: str | None = None, limit: int = 10) -> dict:
+        """Internal FTS5 helper, no longer exposed to the model."""
         try:
             limit = max(1, min(int(limit), 50))
             match = fts_escape(query)
