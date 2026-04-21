@@ -123,10 +123,11 @@ def chunk_pdf(path: Path, stack: ExitStack | None = None) -> list[MediaChunk]:
             # Emit one pdf_text chunk per page; skip rendering and
             # embedded-image extraction entirely. Stops here for this page.
             if not hybrid:
-                if not text:
-                    # Empty page (e.g. a scanned PDF with no OCR layer).
-                    # Skip — we have nothing to embed as text, and the
-                    # user explicitly opted out of image embedding.
+                if not media.is_meaningful_text(text):
+                    # Empty/junk page (e.g. a scanned PDF with no OCR
+                    # layer, or a page with only a page number). Skip —
+                    # we have nothing to embed as text, and the user
+                    # opted out of image embedding.
                     continue
                 chunks.append(MediaChunk(
                     kind="pdf_text",

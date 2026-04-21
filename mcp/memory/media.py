@@ -11,6 +11,8 @@ import base64
 import hashlib
 import io
 import logging
+import os
+import re
 from pathlib import Path
 
 logger = logging.getLogger("memory")
@@ -112,4 +114,43 @@ def make_image_thumbnail(
     )
 
 
-__all__ = ["detect_mime", "sha256_file", "make_image_thumbnail"]
+# ---------------------------------------------------------------------------
+# Text quality filter — keep junk out of the embedding store.
+# ---------------------------------------------------------------------------
+
+# At least 3 consecutive letters/digits. Filters out pure-punctuation
+# lines ("...", "—"), musical cues ("[Music]" survives), single-letter
+# transcripts ("I", "A") and other low-signal Whisper output that
+# otherwise dominates a 768-dim space with a "silent" latent.
+_MEANINGFUL_RE = re.compile(r"[A-Za-z0-9À-ɏ]{3,}")
+
+
+def is_meaningful_text(text: str | None, *, min_chars: int | None = None) -> bool:
+    """Return True when `text` is substantial enough to embed.
+
+    A transcript passes when it has ≥ `min_chars` non-blank characters
+    and contains at least one token of 3+ alphanumerics. The default
+    `min_chars` is read from the `MIN_TRANSCRIPT_CHARS` env var (default
+    20) so operators can tighten / loosen the filter without redeploys.
+
+    Used by every chunker emitting text-embedded kinds
+    (video_transcript, audio_transcript, pdf_text) to avoid polluting
+    the memory table with silent-scene artefacts like `.` or `[Music]`.
+    """
+    if not text:
+        return False
+    stripped = text.strip()
+    if min_chars is None:
+        try:
+            min_chars = int(os.environ.get("MIN_TRANSCRIPT_CHARS", "20"))
+        except ValueError:
+            min_chars = 20
+    if len(stripped) < min_chars:
+        return False
+    return bool(_MEANINGFUL_RE.search(stripped))
+
+
+__all__ = [
+    "detect_mime", "sha256_file", "make_image_thumbnail",
+    "is_meaningful_text",
+]

@@ -94,9 +94,10 @@ async def chunk_audio(
     chunks: list[MediaChunk] = []
     for i, (t_start, t_end, seg_path) in enumerate(segments):
         # Per-segment Whisper (if active). Swallows all errors → "".
-        seg_transcript = (
-            await asr.transcribe(seg_path, language=asr_lang)
-        ).strip()
+        _raw = (await asr.transcribe(seg_path, language=asr_lang)).strip()
+        # Drop low-signal junk ("." from silence, "[Music]" cues, etc.)
+        # so they don't pollute the embedding space as a garbage cluster.
+        seg_transcript = _raw if media.is_meaningful_text(_raw) else ""
 
         # Pick content: Whisper > caller-provided sliced transcript > placeholder.
         if seg_transcript:

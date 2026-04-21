@@ -149,8 +149,11 @@ async def chunk_video(
         # Transcribe the segment BEFORE deciding what content to use.
         # asr.transcribe never raises — empty string signals disabled
         # or silent, in which case we fall back to caption/placeholder.
-        transcript = await asr.transcribe(seg_path, language=asr_lang)
-        transcript = transcript.strip()
+        raw_transcript = (await asr.transcribe(seg_path, language=asr_lang)).strip()
+        # Filter out low-signal Whisper output ("." from silent scenes,
+        # "[Music]", single-letter words) that would cluster as garbage
+        # in the embedding space.
+        transcript = raw_transcript if media.is_meaningful_text(raw_transcript) else ""
 
         if transcript:
             content = transcript
@@ -206,7 +209,8 @@ async def chunk_video(
                     ffmpeg_utils.VIDEO_SEGMENT_MAX_S)
         seg_path = out_dir / f"scene_0000{path.suffix.lower()}"
         ffmpeg_utils.extract_video_segment(path, 0.0, t_end, seg_path)
-        fallback_transcript = (await asr.transcribe(seg_path, language=asr_lang)).strip()
+        _raw_fb = (await asr.transcribe(seg_path, language=asr_lang)).strip()
+        fallback_transcript = _raw_fb if media.is_meaningful_text(_raw_fb) else ""
         if fallback_transcript:
             content = fallback_transcript
         elif caption and caption.strip():
