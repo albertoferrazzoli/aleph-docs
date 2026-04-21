@@ -677,6 +677,30 @@ def register(mcp):
                     ),
                 }
 
+            # Second guardrail: even when a target page exists, refuse the
+            # update if the supporting insights are only loosely related to
+            # the topic. Target confidence measures "is there a good place
+            # to write?"; insight confidence measures "do we know enough to
+            # write it?". Both must pass for a safe PR.
+            LOW_INSIGHT_CONFIDENCE = 0.6
+            abort_recommendation = None
+            if confidence < LOW_INSIGHT_CONFIDENCE:
+                abort_recommendation = {
+                    "reason": "low_insight_confidence",
+                    "overall_confidence": round(confidence, 3),
+                    "threshold": LOW_INSIGHT_CONFIDENCE,
+                    "message": (
+                        f"Supporting insights are weakly correlated with the "
+                        f"topic (avg score {confidence:.2f} < "
+                        f"{LOW_INSIGHT_CONFIDENCE}). The retrieval returned "
+                        "notes that cosine-match the topic but are likely "
+                        "off-subject. Do NOT invoke propose_doc_patch "
+                        "automatically; either refine the topic wording, "
+                        "or capture more on-point insights first via "
+                        "`remember()` before retrying."
+                    ),
+                }
+
             return {
                 "topic": topic,
                 "target_path": target_path,
@@ -686,6 +710,7 @@ def register(mcp):
                 "confidence": round(confidence, 3),
                 "instructions_for_writer": instructions_for_writer,
                 "fallback_proposal": fallback_proposal,
+                "abort_recommendation": abort_recommendation,
             }
         except db.MemoryDisabled:
             return {"error": "semantic memory is disabled"}
