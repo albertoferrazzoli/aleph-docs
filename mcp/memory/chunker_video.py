@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import List
 
 from . import asr, ffmpeg_utils, media
+from .embedders import get_backend
 from .types import MediaChunk
 
 logger = logging.getLogger("memory")
@@ -123,6 +124,24 @@ async def chunk_video(
     # Whisper can transcribe it — we just never send it to the
     # multimodal embedder.
     hybrid = os.environ.get("HYBRID_MEDIA_EMBEDDING", "true").strip().lower() == "true"
+    # Optional cross-modal extension: when the active backend embeds
+    # images (e.g. nomic_multimodal_local, gemini-2-preview), emit a
+    # paired `image` chunk per scene from the extracted keyframe. Lets
+    # queries match on what is *shown* in the scene, not only on what
+    # the transcript *says*. Gated behind HYBRID + backend capability,
+    # so `local` (text-only) stays untouched.
+    try:
+        _backend_modalities = get_backend().modalities
+    except Exception:
+        _backend_modalities = frozenset()
+    # `video_scene` embeds the whole segment .mp4 — only valid on
+    # backends that declare the `video` modality. Gate it off here
+    # otherwise every video ingest would fail with a RuntimeError in
+    # store.upsert_media_chunk.
+    emit_video_scene = hybrid and ("video" in _backend_modalities)
+    # Keyframe image rows cover the visual axis when the backend
+    # embeds images but not raw video (e.g. nomic_multimodal_local).
+    emit_keyframe_image = hybrid and ("image" in _backend_modalities)
 
     for i, (t_start, t_end) in enumerate(bounds):
         seg_path = out_dir / f"scene_{i:04d}{path.suffix.lower()}"
@@ -173,7 +192,7 @@ async def chunk_video(
         if transcript:
             meta["has_transcript"] = True
 
-        if hybrid:
+        if emit_video_scene:
             chunks.append(MediaChunk(
                 kind="video_scene",
                 content=content,
@@ -203,6 +222,24 @@ async def chunk_video(
                 path=None,
             ))
 
+        # Optional keyframe image row — embedded visually into the same
+        # latent space as text, so queries can match what the scene
+        # *shows*. Kind is `image` (already in _KIND_TO_MODALITY) with
+        # metadata.origin marking it as a video-derived keyframe.
+        if emit_keyframe_image and kf and kf.is_file():
+            chunks.append(MediaChunk(
+                kind="image",
+                content=f"keyframe scene {i} @ {t_start:.1f}s",
+                media_ref=f"{resolved_src}#t={t_start:.2f}",
+                media_type="image/png",
+                preview_b64=thumb,
+                metadata={
+                    **meta,
+                    "origin": "video_keyframe",
+                },
+                path=kf,
+            ))
+
     if not chunks:
         # Pathological: produce a single whole-file fallback segment.
         t_end = min(duration or ffmpeg_utils.VIDEO_SEGMENT_MAX_S,
@@ -227,7 +264,7 @@ async def chunk_video(
         }
         if fallback_transcript:
             fallback_meta["has_transcript"] = True
-        if hybrid:
+        if emit_video_scene:
             chunks.append(MediaChunk(
                 kind="video_scene",
                 content=content,

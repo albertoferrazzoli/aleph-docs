@@ -39,6 +39,7 @@ data/
 # everything else is user-owned and must not be committed.
 docs/*
 !docs/README.md
+!docs/EMBED_NOMIC_SETUP.md
 !docs/guides/
 docs/guides/*
 !docs/guides/getting-started.md

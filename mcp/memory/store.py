@@ -358,6 +358,16 @@ async def insert_insight(
 # Which `MediaChunk.kind` values map to which backend modality capability.
 # `*_transcript` kinds are text-embedded (the transcript string IS the
 # embed input) — they pass through any backend that supports text.
+#
+# Backend / kind compatibility notes:
+#   gemini-*              : all kinds supported.
+#   local  (Ollama text)  : only *_transcript + pdf_text (text-only).
+#   nomic_multimodal_local: text kinds + `image` (via vision endpoint).
+#       video_scene / audio_clip / pdf_page WILL fail fast here because
+#       the backend does not declare video/audio/pdf modalities — by
+#       design. For video coverage we emit extra `kind="image"` chunks
+#       from extracted keyframes (see chunker_video.py); audio stays
+#       covered by audio_transcript; PDFs stay covered by pdf_text.
 _KIND_TO_MODALITY = {
     "image": "image",
     "video_scene": "video",

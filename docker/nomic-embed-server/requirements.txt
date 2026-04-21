@@ -1,0 +1,12 @@
+fastapi>=0.110,<1.0
+uvicorn[standard]>=0.27
+# Pin to the stable combo — Nomic's custom config code is incompatible
+# with transformers 5.x strict dataclass validation.
+sentence-transformers==3.0.1
+transformers==4.44.2
+huggingface_hub==0.24.7
+tokenizers>=0.19,<0.20
+torch>=2.2
+pillow>=10.0
+einops>=0.7
+python-multipart>=0.0.9

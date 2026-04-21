@@ -20,6 +20,7 @@ from contextlib import ExitStack
 from pathlib import Path
 
 from . import media
+from .embedders import get_backend
 from .types import MediaChunk
 
 logger = logging.getLogger("memory")
@@ -97,6 +98,22 @@ def chunk_pdf(path: Path, stack: ExitStack | None = None) -> list[MediaChunk]:
     # extracted text as content. Embedding is done as text by the
     # store, so works with any backend including local Ollama.
     hybrid = os.environ.get("HYBRID_MEDIA_EMBEDDING", "true").strip().lower() == "true"
+    # Route rendered pages through whichever modality the active backend
+    # supports. gemini-* declare "pdf", nomic_multimodal_local declares
+    # "image" (same PNG bytes, different embedding surface), local has
+    # neither and gets forced onto the text-only branch below.
+    try:
+        _modalities = get_backend().modalities
+    except Exception:
+        _modalities = frozenset()
+    if "pdf" in _modalities:
+        _page_kind = "pdf_page"
+    elif "image" in _modalities:
+        _page_kind = "image"
+    else:
+        # Backend can embed neither pdf nor image — force text-only mode
+        # regardless of HYBRID_MEDIA_EMBEDDING so ingest does not fail.
+        hybrid = False
 
     chunks: list[MediaChunk] = []
     try:
@@ -161,23 +178,48 @@ def chunk_pdf(path: Path, stack: ExitStack | None = None) -> list[MediaChunk]:
 
             snippet = text[:_PREVIEW_TEXT_CHARS] if text else stem
 
+            _page_meta = {
+                "sha256_src": sha256,
+                "page": i + 1,
+                "total_pages": total,
+                "text_chars": len(text),
+                # Stash so callers can clean up after the embed step
+                # (see tools/memory.py _route_media pattern).
+                "_tmpdir": str(tmpdir) if owned_stack else None,
+            }
+            if _page_kind == "image":
+                _page_meta["origin"] = "pdf_page"
             chunks.append(MediaChunk(
-                kind="pdf_page",
+                kind=_page_kind,
                 content=snippet,
                 media_ref=f"{abs_path}#page={i + 1}",
-                media_type="application/pdf",
+                media_type=(
+                    "application/pdf" if _page_kind == "pdf_page"
+                    else "image/png"
+                ),
                 preview_b64=preview,
-                metadata={
-                    "sha256_src": sha256,
-                    "page": i + 1,
-                    "total_pages": total,
-                    "text_chars": len(text),
-                    # Stash so callers can clean up after the embed step
-                    # (see tools/memory.py _route_media pattern).
-                    "_tmpdir": str(tmpdir) if owned_stack else None,
-                },
+                metadata=_page_meta,
                 path=png_path,
             ))
+            # Also emit a paired pdf_text row when the page has
+            # meaningful extracted text. Cheap (text embed) and makes
+            # PDFs fully queryable by prose even with image-only
+            # backends like nomic.
+            if media.is_meaningful_text(text):
+                chunks.append(MediaChunk(
+                    kind="pdf_text",
+                    content=text,
+                    media_ref=f"{abs_path}#page={i + 1}",
+                    media_type="text/plain",
+                    preview_b64=preview,
+                    metadata={
+                        "sha256_src": sha256,
+                        "page": i + 1,
+                        "total_pages": total,
+                        "text_chars": len(text),
+                    },
+                    path=None,
+                ))
 
             # Additionally: extract embedded raster images as separate
             # `image` chunks so they are searchable at fine granularity.

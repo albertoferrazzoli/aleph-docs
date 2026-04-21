@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import List
 
 from . import asr, ffmpeg_utils, media
+from .embedders import get_backend
 from .types import MediaChunk
 
 logger = logging.getLogger("memory")
@@ -90,6 +91,14 @@ async def chunk_audio(
     asr_lang = os.environ.get("ASR_LANGUAGE", "").strip() or None
     # Zero-cost text-only mode: keep only the audio_transcript row.
     hybrid = os.environ.get("HYBRID_MEDIA_EMBEDDING", "true").strip().lower() == "true"
+    # `audio_clip` embeds the raw segment — only valid when the backend
+    # declares "audio". Without it (e.g. nomic_multimodal_local) emit
+    # only the text-embedded audio_transcript rows.
+    try:
+        _backend_modalities = get_backend().modalities
+    except Exception:
+        _backend_modalities = frozenset()
+    emit_audio_clip = hybrid and ("audio" in _backend_modalities)
 
     chunks: list[MediaChunk] = []
     for i, (t_start, t_end, seg_path) in enumerate(segments):
@@ -120,7 +129,7 @@ async def chunk_audio(
         if seg_transcript:
             meta["has_transcript"] = True
 
-        if hybrid:
+        if emit_audio_clip:
             chunks.append(MediaChunk(
                 kind="audio_clip",
                 content=content,

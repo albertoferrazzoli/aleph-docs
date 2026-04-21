@@ -23,6 +23,7 @@ _REGISTRY: Dict[str, str] = {
     "gemini-001": "memory.embedders.gemini_001",
     "gemini-2-preview": "memory.embedders.gemini_2",
     "local": "memory.embedders.local",
+    "nomic_multimodal_local": "memory.embedders.nomic_multimodal_local",
 }
 
 DEFAULT_BACKEND = "gemini-001"

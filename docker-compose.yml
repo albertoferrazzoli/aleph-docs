@@ -79,6 +79,11 @@ services:
       OLLAMA_HOST: ${OLLAMA_HOST:-http://ollama:11434}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-bge-m3}
       LOCAL_EMBED_DIM: ${LOCAL_EMBED_DIM:-1024}
+      # nomic_multimodal_local backend — host-side FastAPI server that
+      # loads nomic-embed-text-v1.5 + nomic-embed-vision-v1.5. See
+      # docs/EMBED_NOMIC_SETUP.md for the host setup.
+      EMBED_NOMIC_HOST: ${EMBED_NOMIC_HOST:-http://host.docker.internal:8091}
+      EMBED_NOMIC_TIMEOUT_S: ${EMBED_NOMIC_TIMEOUT_S:-60}
       # Reconciler: set false to skip the boot-time media scan and rely
       # only on the watcher (local mode) or on-demand reindex_docs().
       INGEST_MEDIA_ON_BOOT: ${INGEST_MEDIA_ON_BOOT:-true}

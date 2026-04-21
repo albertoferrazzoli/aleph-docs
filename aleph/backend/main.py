@@ -401,7 +401,7 @@ async def get_media(memory_id: str, request: Request) -> FileResponse:
         async with db.get_conn() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
-                    "SELECT media_ref, media_type "
+                    "SELECT media_ref, media_type, preview_b64, metadata "
                     "FROM memories WHERE id = %s",
                     (memory_id,),
                 )
@@ -412,7 +412,28 @@ async def get_media(memory_id: str, request: Request) -> FileResponse:
 
     if not row:
         raise HTTPException(status_code=404, detail="memory not found")
-    media_ref, media_type = row
+    media_ref, media_type, preview_b64, metadata = row
+
+    # Image-kind nodes whose media_ref points to a non-image source
+    # (e.g. video keyframes with media_ref=<file>.mp4#t=N, or PDF pages
+    # routed as kind=image on backends lacking the 'pdf' modality).
+    # The underlying raster lives in a tempdir that is wiped after
+    # ingest, so serve the persisted thumbnail from preview_b64
+    # (~16 KB per frame — small, already optimised at ingest time).
+    _virtual_origins = {"video_keyframe", "pdf_page"}
+    if (
+        (media_type or "").startswith("image/")
+        and isinstance(metadata, dict)
+        and metadata.get("origin") in _virtual_origins
+        and preview_b64
+    ):
+        import base64 as _b64
+        from starlette.responses import Response
+        try:
+            png_bytes = _b64.b64decode(preview_b64)
+        except Exception:
+            raise HTTPException(status_code=500, detail="bad preview payload")
+        return Response(content=png_bytes, media_type="image/jpeg")
     if not media_ref:
         raise HTTPException(status_code=404, detail="no media_ref on this memory")
 

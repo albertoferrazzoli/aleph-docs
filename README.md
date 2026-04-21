@@ -390,6 +390,7 @@ the links are in the last column.
 | `gemini-2-preview` | **Audio** | per 1M tokens | **$6.50** | same |
 | `gemini-2-preview` | **Video** | per frame @ 1 fps | **$0.00079** | same |
 | `local` (Ollama + BGE-M3) | Any (uses local compute) | **$0** recurring | electricity only | [Ollama models](https://ollama.com/library) |
+| `nomic_multimodal_local` | Text + Image (incl. video keyframes, via host server) | **$0** recurring | electricity only (~2 GB one-time weight download) | [docs/EMBED_NOMIC_SETUP.md](docs/EMBED_NOMIC_SETUP.md) |
 
 **ASR (speech-to-text)** is a separate cost dimension: when `ASR_ENABLED=true`
 the video/audio chunkers call the selected `ASR_BACKEND` for each
@@ -557,6 +558,49 @@ a few seconds per chunk on a modern laptop.
 
 See [`.env.example`](.env.example) for the full list of `OLLAMA_*` knobs.
 
+### Adding image / video-keyframe retrieval — `nomic_multimodal_local`
+
+The `local` backend is text-only. If you want **cross-modal retrieval
+at zero recurring cost** — "find the slide with the candlestick
+chart" even when the instructor never says those words — use
+`EMBED_BACKEND=nomic_multimodal_local` instead. It routes text to
+[`nomic-embed-text-v1.5`](https://huggingface.co/nomic-ai/nomic-embed-text-v1.5)
+and images to [`nomic-embed-vision-v1.5`](https://huggingface.co/nomic-ai/nomic-embed-vision-v1.5) —
+both 768-dim, **same latent space**, so `cosine(text, image)` is
+meaningful.
+
+Because the torch dep + ~2 GB of weights are too heavy for the mcp
+container, the models run on a small FastAPI server **on the host**
+(same host-bridge pattern as whisper.cpp), reached via
+`host.docker.internal:8091`. On Apple Silicon the server uses Metal
+(MPS) automatically.
+
+See [`docs/EMBED_NOMIC_SETUP.md`](docs/EMBED_NOMIC_SETUP.md) for the
+step-by-step walkthrough. Quick-config once the server is running:
+
+```bash
+EMBED_BACKEND=nomic_multimodal_local
+EMBED_DIM=768                               # must match model native dim
+HYBRID_MEDIA_EMBEDDING=true                 # enables keyframe images on videos
+EMBED_NOMIC_HOST=http://host.docker.internal:8091
+```
+
+Then wipe + rebuild the DB (dim change 1024 → 768):
+
+```bash
+docker compose down -v && docker compose up -d --build
+```
+
+With `HYBRID_MEDIA_EMBEDDING=true`, each video scene emits a
+`video_transcript` row **and** a per-scene keyframe `image` row
+(metadata `origin=video_keyframe`) — so queries hit both what was
+said *and* what was shown. Standalone images and PDF pages rendered
+as images are embedded in the same space.
+
+Limitation: the backend does not embed raw video / audio / PDF blobs
+(only still frames + text). For full-media embedding stay on
+`gemini-2-preview`.
+
 ---
 
 ## Running Whisper locally for free transcripts
@@ -674,6 +718,7 @@ pgvector columns are typed as `vector(N)` where `N` is fixed at
 | `gemini-001`, `gemini-2-preview` | 1536 |
 | `local` + `bge-m3` | 1024 |
 | `local` + `nomic-embed-text` | 768 |
+| `nomic_multimodal_local` | 768 |
 
 Changing the backend therefore requires a schema rebuild. The db
 container's `init-memory.sh` wrapper reads `EMBED_DIM` from the
