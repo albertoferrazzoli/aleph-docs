@@ -188,41 +188,73 @@ async def activate(ws: Workspace) -> dict:
         if hasattr(_indexer, "refresh_paths"):
             _indexer.refresh_paths()
         if hasattr(_indexer, "open_db") and hasattr(_indexer, "iter_doc_files"):
-            # Re-implement `indexer.rebuild()` in async-safe form:
-            # its stock version calls `asyncio.run(_flush_memory(...))`
-            # which blows up inside our running loop.
-            sconn = _indexer.open_db()
+            # Rebuild the SQLite markdown index ONLY when the target
+            # workspace differs from the last rebuild. The rebuild
+            # itself runs in the background so the switch POST
+            # returns immediately — the viewer can load the cached
+            # graph snapshot while the markdown index catches up.
+            should_rebuild = False
+            sconn0 = _indexer.open_db()
             try:
-                _indexer._pending_embeds.clear()
-                _indexer._pending_images.clear()
-                sconn.executescript(
-                    "DELETE FROM pages; DELETE FROM pages_fts; "
-                    "DELETE FROM code_blocks; DELETE FROM code_blocks_fts;"
-                )
-                n = 0
-                for abs_path in _indexer.iter_doc_files(_indexer.REPO_PATH):
-                    rel = abs_path.relative_to(
-                        _indexer.REPO_PATH / _indexer.CONTENT_SUBDIR
-                        if _indexer.CONTENT_SUBDIR else _indexer.REPO_PATH
-                    ).as_posix()
-                    _indexer.upsert_page(sconn, rel, abs_path)
-                    n += 1
-                _indexer.set_meta(sconn, "last_indexed_at", str(int(__import__("time").time())))
-                sconn.commit()
-                log.info("[workspaces] markdown rebuild for %s: %d pages", ws.name, n)
-                pending = list(_indexer._pending_embeds)
-                pending_images = list(_indexer._pending_images)
-                _indexer._pending_embeds.clear()
-                _indexer._pending_images.clear()
-                if pending or pending_images:
-                    await _indexer._flush_memory(pending, pending_images)
-                    log.info("[workspaces] markdown embed flush: %d doc_chunks, "
-                             "%d image refs", len(pending), len(pending_images))
+                last_ws = _indexer.get_meta(sconn0, "workspace_name") or ""
+                should_rebuild = (last_ws != ws.name)
             finally:
                 try:
-                    sconn.close()
+                    sconn0.close()
                 except Exception:
                     pass
+
+            if should_rebuild:
+                _ws_name = ws.name
+                _ws_dsn = os.environ.get("PG_DSN", "")
+
+                async def _markdown_rebuild_bg(ws_name=_ws_name, dsn=_ws_dsn):
+                    try:
+                        from . import db as _memdb  # local import
+                        import time as _time
+                        async with _memdb.pool_override(dsn):
+                            sconn = _indexer.open_db()
+                            try:
+                                _indexer._pending_embeds.clear()
+                                _indexer._pending_images.clear()
+                                sconn.executescript(
+                                    "DELETE FROM pages; DELETE FROM pages_fts; "
+                                    "DELETE FROM code_blocks; DELETE FROM code_blocks_fts;"
+                                )
+                                n = 0
+                                for abs_path in _indexer.iter_doc_files(_indexer.REPO_PATH):
+                                    rel = abs_path.relative_to(
+                                        _indexer.REPO_PATH / _indexer.CONTENT_SUBDIR
+                                        if _indexer.CONTENT_SUBDIR else _indexer.REPO_PATH
+                                    ).as_posix()
+                                    _indexer.upsert_page(sconn, rel, abs_path)
+                                    n += 1
+                                _indexer.set_meta(sconn, "workspace_name", ws_name)
+                                _indexer.set_meta(sconn, "last_indexed_at",
+                                                  str(int(_time.time())))
+                                sconn.commit()
+                                log.info("[workspaces] markdown rebuild for %s: "
+                                         "%d pages", ws_name, n)
+                                pending = list(_indexer._pending_embeds)
+                                pending_images = list(_indexer._pending_images)
+                                _indexer._pending_embeds.clear()
+                                _indexer._pending_images.clear()
+                                if pending or pending_images:
+                                    await _indexer._flush_memory(pending, pending_images)
+                                    log.info("[workspaces] markdown embed flush "
+                                             "for %s: %d doc_chunks, %d image refs",
+                                             ws_name, len(pending), len(pending_images))
+                            finally:
+                                try:
+                                    sconn.close()
+                                except Exception:
+                                    pass
+                    except Exception as e:
+                        log.warning("[workspaces] background markdown rebuild "
+                                    "for %s failed: %s", ws_name, e)
+
+                import asyncio as _asyncio
+                _asyncio.create_task(_markdown_rebuild_bg())
     except Exception as e:
         log.warning("[workspaces] indexer refresh/rebuild failed: %s", e)
 
