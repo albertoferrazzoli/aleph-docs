@@ -159,11 +159,14 @@ async def activate(ws: Workspace) -> dict:
     if ws.pg_db:
         db_created = await _ensure_database(new_dsn, ws.pg_db)
         if db_created:
+            # New DB → apply full schema + aleph extras (triggers etc).
             await _apply_schema(new_dsn, ws.dim)
-        else:
-            # Even for existing DBs, run the schema idempotently so a
-            # dim mismatch surfaces at switch time rather than later.
-            await _apply_schema(new_dsn, ws.dim)
+        # Existing DBs: DO NOT re-apply. Idempotent schemas sound safe
+        # in isolation but when two processes (aleph + mcp) activate
+        # the same workspace concurrently their parallel
+        # `DROP TRIGGER ... CREATE TRIGGER ...` statements deadlock
+        # on the memories table. The schema files are authored as
+        # first-boot DDL, not hot paths.
 
     # 3) pool restart
     await db.close_pool()

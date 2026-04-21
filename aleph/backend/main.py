@@ -221,12 +221,21 @@ async def graph_stream(request: Request):
                     last_ping = now
 
                 if notify_task in done:
+                    # Always retrieve the result before clearing the
+                    # handle — otherwise Python raises a noisy
+                    # "Task exception was never retrieved" warning if
+                    # the underlying DB connection was closed by a
+                    # workspace switch. Broken stream is recoverable
+                    # by the client which auto-reconnects.
                     try:
                         n = notify_task.result()
                     except StopAsyncIteration:
+                        notify_task = None
                         break
-                    except Exception as e:  # pragma: no cover
-                        log.warning("[aleph] notify loop error: %s", e)
+                    except BaseException as e:
+                        log.info("[aleph] notify stream closed (reconnect will "
+                                 "re-establish): %s", e)
+                        notify_task = None
                         break
                     notify_task = None
 
