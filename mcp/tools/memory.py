@@ -448,15 +448,21 @@ def register(mcp):
 
     @mcp.tool()
     async def suggest_doc_update(topic: str, top_k: int = 8) -> dict:
-        """Propose a markdown patch to the canonical docs based on stored memory.
+        """Collect the raw material needed to extend the canonical docs for a topic.
 
-        Algorithm (PRD 3.6):
-        1) Fetch top-k insights+interactions matching `topic` (score > 0.3).
-        2) Fetch top-k doc_chunks; aggregate score per source_path; pick best.
-        3) Compose a '## Notes from support (auto-suggested)' block (override
-           via DOC_PATCH_HEADING env to match the docs' language) listing the
-           insights with stability/access_count annotation.
-        4) Return a structured suggestion. NO automatic PR.
+        This tool does NOT compose the final markdown — it returns structured
+        evidence and the caller (the LLM) must weave it into prose that matches
+        the voice of the target documentation page.
+
+        Algorithm:
+        1) Fetch top-k insights + interactions matching `topic` (score >= 0.3).
+        2) Fetch top-k doc_chunks with a strict threshold (score >= 0.4). Only
+           pages that contribute at least 2 matching chunks are considered as
+           target candidates, to avoid picking a page that merely mentions the
+           topic in passing.
+        3) Return the best target page, the matching section, the supporting
+           notes (content only, no internal metadata), and explicit writing
+           instructions for the caller.
 
         Args:
             topic: The topic to generate suggestions for.
@@ -468,44 +474,73 @@ def register(mcp):
             interactions = await store.search(topic, kind="interaction", limit=top_k, min_score=0.3)
             supporting = sorted(insights + interactions, key=lambda r: r.get("score", 0.0), reverse=True)[:top_k]
             if not supporting:
-                return {"topic": topic, "target_path": None,
-                        "confidence": 0.0, "related_insights": [],
-                        "suggested_diff_markdown": "",
-                        "message": "no memory above threshold - nothing to suggest yet"}
+                return {
+                    "topic": topic,
+                    "target_path": None,
+                    "confidence": 0.0,
+                    "supporting_notes": [],
+                    "message": "no memory above threshold - nothing to suggest yet",
+                }
 
-            doc_hits = await store.search(topic, kind="doc_chunk", limit=top_k, min_score=0.15)
-            agg: dict[str, float] = {}
+            # Tight threshold + minimum 2 matching chunks per target page to
+            # avoid picking a page that only mentions the topic once.
+            doc_hits = await store.search(topic, kind="doc_chunk", limit=max(top_k, 10), min_score=0.4)
+            page_scores: dict[str, list[float]] = {}
             section_of: dict[str, str] = {}
             for d in doc_hits:
                 sp = d.get("source_path") or ""
                 if not sp:
                     continue
-                agg[sp] = agg.get(sp, 0.0) + d.get("score", 0.0)
+                page_scores.setdefault(sp, []).append(d.get("score", 0.0))
                 section_of.setdefault(sp, d.get("source_section") or "")
-            target_path = max(agg, key=agg.get) if agg else None
+            candidates = {p: sum(s) for p, s in page_scores.items() if len(s) >= 2}
+            if not candidates:
+                # Fall back to best single-chunk page so the caller still has a hint,
+                # but flag low target confidence.
+                candidates = {p: sum(s) for p, s in page_scores.items()}
+            target_path = max(candidates, key=candidates.get) if candidates else None
             target_section = section_of.get(target_path or "", "")
+            target_confidence = 0.0
+            if target_path:
+                chunks_on_target = len(page_scores.get(target_path, []))
+                target_confidence = round(min(1.0, candidates[target_path] / max(2, chunks_on_target)), 3)
 
-            heading = os.environ.get("DOC_PATCH_HEADING", "## Notes from support (auto-suggested)")
-            lines = [heading, ""]
-            for m in supporting:
-                c = (m.get("content") or "").replace("\n", " ").strip()
-                s = m.get("stability", 0.0)
-                n = m.get("access_count", 0)
-                lines.append(f"- {c} _(stability: {s:.1f}, access_count: {n})_")
-            suggested = "\n".join(lines) + "\n"
+            confidence = min(1.0, sum(m.get("score", 0.0) for m in supporting) / len(supporting))
 
-            confidence = min(1.0, (sum(m.get("score", 0.0) for m in supporting) / len(supporting)) if supporting else 0.0)
+            supporting_notes = [
+                (m.get("content") or "").replace("\n", " ").strip()
+                for m in supporting
+            ]
+
+            instructions_for_writer = (
+                "Do NOT publish the `supporting_notes` verbatim. They are raw "
+                "retrieval material captured from internal support interactions "
+                "and may contain informal shorthand, tokens like 'GOTCHA', or "
+                "duplicates.\n"
+                "\n"
+                "Write ONE discursive paragraph in the voice of a user manual "
+                "that extends `target_section` on `target_path`. The paragraph "
+                "must:\n"
+                "  - be in the same natural language as the existing page,\n"
+                "  - integrate smoothly with the surrounding prose (no new H2 "
+                "    heading, no bullet list),\n"
+                "  - cover only facts that are consistent across the supporting "
+                "    notes; drop outliers or near-duplicates,\n"
+                "  - omit all internal metadata (stability, access_count, ids, "
+                "     scores) and all support-jargon tokens.\n"
+                "\n"
+                "Once the paragraph is drafted, pass it to `propose_doc_patch` "
+                "as the `prose` argument to produce the git commit."
+            )
+
             return {
                 "topic": topic,
                 "target_path": target_path,
                 "target_section": target_section,
-                "suggested_diff_markdown": suggested,
-                "related_insights": [
-                    {"id": m["id"], "content": m["content"], "score": m.get("score"),
-                     "stability": m.get("stability"), "access_count": m.get("access_count")}
-                    for m in supporting
-                ],
+                "target_confidence": target_confidence,
+                "supporting_notes": supporting_notes,
                 "confidence": round(confidence, 3),
+                "instructions_for_writer": instructions_for_writer,
             }
         except db.MemoryDisabled:
             return {"error": "semantic memory is disabled"}
@@ -513,108 +548,122 @@ def register(mcp):
             return error_response(e)
 
     @mcp.tool()
-    async def propose_doc_patch(topic: str, top_k: int = 8,
+    async def propose_doc_patch(topic: str, prose: str = "",
+                                target_path: str = "",
+                                target_section: str = "",
+                                top_k: int = 8,
                                 dry_run: bool = False,
                                 open_pr: bool = False) -> dict:
-        """Prepare a git branch + commit in the docs repo with a suggested update.
+        """Create a git branch + commit in the docs repo with a user-authored
+        extension to an existing page.
 
-        Wraps `suggest_doc_update`: runs the same algorithm, then (if confidence
-        is high enough) creates a local branch `docs/mcp-<slug>-<YYYYMMDD-HHMM>`
-        inside the docs repo clone, inserts the suggested markdown block after
-        the target H2 section (or at EOF), and commits it.
+        Typical flow:
+          1. Call `suggest_doc_update(topic=...)` to fetch the target page,
+             the matching section, and the supporting notes.
+          2. You (the caller) write ONE discursive paragraph in the voice of
+             the existing documentation, following the `instructions_for_writer`
+             returned by step 1.
+          3. Call `propose_doc_patch(topic=..., prose=<your paragraph>)`.
 
-        When `open_pr=True` it also pushes the branch and opens a GitHub pull
-        request against `main` (requires DOCS_WRITE_TOKEN env with write scope).
+        `prose` is inserted verbatim immediately after the target H2 section
+        (or at EOF if none). The tool does NOT add a heading, a bullet list,
+        or any metadata — what you pass is exactly what gets committed.
+        `target_path` and `target_section` are optional overrides; when
+        omitted the tool re-runs the retrieval from `suggest_doc_update` and
+        uses its best guess.
+
+        If `prose` is empty, the tool returns `status: "needs_prose"` with
+        the same material as `suggest_doc_update` so the caller can draft it
+        and try again.
 
         Args:
-            topic: Topic to generate a suggestion for (same as suggest_doc_update).
-            top_k: How many supporting memories to consider (default 8).
+            topic: Topic identifier used for branch/commit naming.
+            prose: Markdown paragraph(s) authored by the caller. Required
+                for an actual commit.
+            target_path: Override target doc path (relative to repo).
+            target_section: Override H2 section name to insert after.
+            top_k: How many supporting memories to consider when deriving
+                defaults for `target_path` / `target_section` (default 8).
             dry_run: If true, compute the plan but don't touch the repo.
-            open_pr: If true, after committing also push the branch and open a PR.
+            open_pr: If true, after committing also push the branch and
+                open a PR.
         """
         from memory.doc_patch import apply_patch, push_branch, open_pull_request, _get_repo_path
 
         try:
             top_k = max(1, min(int(top_k), 20))
-            insights = await store.search(topic, kind="insight",
-                                          limit=top_k, min_score=0.3)
-            interactions = await store.search(topic, kind="interaction",
+
+            # Resolve target via suggest_doc_update's logic when not overridden.
+            supporting: list[dict] = []
+            if not target_path or not target_section:
+                insights = await store.search(topic, kind="insight",
                                               limit=top_k, min_score=0.3)
-            supporting = sorted(insights + interactions,
-                                key=lambda r: r.get("score", 0.0),
-                                reverse=True)[:top_k]
-            if not supporting:
-                return {"status": "skipped", "topic": topic,
-                        "confidence": 0.0,
-                        "message": "no memory above threshold - nothing to suggest"}
+                interactions = await store.search(topic, kind="interaction",
+                                                  limit=top_k, min_score=0.3)
+                supporting = sorted(insights + interactions,
+                                    key=lambda r: r.get("score", 0.0),
+                                    reverse=True)[:top_k]
 
-            doc_hits = await store.search(topic, kind="doc_chunk",
-                                          limit=top_k, min_score=0.15)
-            agg: dict[str, float] = {}
-            section_of: dict[str, str] = {}
-            for d in doc_hits:
-                sp = d.get("source_path") or ""
-                if not sp:
-                    continue
-                agg[sp] = agg.get(sp, 0.0) + d.get("score", 0.0)
-                section_of.setdefault(sp, d.get("source_section") or "")
-            target_path = max(agg, key=agg.get) if agg else None
-            target_section = section_of.get(target_path or "", "")
+                doc_hits = await store.search(topic, kind="doc_chunk",
+                                              limit=max(top_k, 10), min_score=0.4)
+                page_scores: dict[str, list[float]] = {}
+                section_of: dict[str, str] = {}
+                for d in doc_hits:
+                    sp = d.get("source_path") or ""
+                    if not sp:
+                        continue
+                    page_scores.setdefault(sp, []).append(d.get("score", 0.0))
+                    section_of.setdefault(sp, d.get("source_section") or "")
+                candidates = {p: sum(s) for p, s in page_scores.items() if len(s) >= 2}
+                if not candidates:
+                    candidates = {p: sum(s) for p, s in page_scores.items()}
+                resolved_path = max(candidates, key=candidates.get) if candidates else None
+                target_path = target_path or (resolved_path or "")
+                target_section = target_section or section_of.get(resolved_path or "", "")
 
-            confidence = min(
-                1.0,
-                sum(m.get("score", 0.0) for m in supporting) / len(supporting),
-            )
+            if not prose.strip():
+                supporting_notes = [
+                    (m.get("content") or "").replace("\n", " ").strip()
+                    for m in supporting
+                ] if supporting else []
+                return {
+                    "status": "needs_prose",
+                    "topic": topic,
+                    "target_path": target_path or None,
+                    "target_section": target_section or None,
+                    "supporting_notes": supporting_notes,
+                    "message": (
+                        "No `prose` provided. Call suggest_doc_update first, "
+                        "compose a single paragraph in the voice of the target "
+                        "documentation page, then re-invoke propose_doc_patch "
+                        "with the paragraph as the `prose` argument."
+                    ),
+                }
 
-            if not target_path or confidence < 0.3:
+            if not target_path:
                 return {
                     "status": "skipped",
                     "topic": topic,
-                    "target_path": target_path,
-                    "confidence": round(confidence, 3),
-                    "message": ("no target_path" if not target_path
-                                else "confidence below 0.3"),
+                    "message": "no target_path could be inferred — pass one explicitly",
                 }
 
-            heading = os.environ.get("DOC_PATCH_HEADING", "## Notes from support (auto-suggested)")
-            lines = [heading, ""]
-            for m in supporting:
-                c = (m.get("content") or "").replace("\n", " ").strip()
-                s = m.get("stability", 0.0)
-                n = m.get("access_count", 0)
-                lines.append(f"- {c} _(stability: {s:.1f}, access_count: {n})_")
-            suggested = "\n".join(lines) + "\n"
+            # Preserve caller prose verbatim. Trim surrounding whitespace and
+            # ensure exactly one trailing newline so the diff is clean.
+            markdown_block = prose.strip() + "\n"
 
-            commit_subject = f"docs: auto-suggestion for {topic}"
-            body_lines = [
-                f"Topic: {topic}",
-                f"Target: {target_path} (section: {target_section or 'EOF'})",
-                f"Confidence: {confidence:.3f}",
-                "",
-                "Supporting insights:",
-            ]
-            for m in supporting:
-                preview = (m.get("content") or "").replace("\n", " ")[:180]
-                body_lines.append(
-                    f"- [{m.get('id')}] score={m.get('score', 0):.2f} "
-                    f"stability={m.get('stability', 0):.1f} "
-                    f"access_count={m.get('access_count', 0)}: {preview}"
-                )
-            commit_body = "\n".join(body_lines)
-
-            supporting_payload = [
-                {"id": m["id"], "content": m["content"],
-                 "score": m.get("score"),
-                 "stability": m.get("stability"),
-                 "access_count": m.get("access_count")}
-                for m in supporting
-            ]
+            commit_subject = f"docs: extend {target_section or target_path} with {topic}"
+            commit_body = (
+                f"Topic: {topic}\n"
+                f"Target: {target_path} (section: {target_section or 'EOF'})\n"
+                f"\n"
+                f"Paragraph authored by the caller via propose_doc_patch."
+            )
 
             result = apply_patch(
                 topic=topic,
                 target_rel_path=target_path,
                 section_anchor=target_section,
-                markdown_block=suggested,
+                markdown_block=markdown_block,
                 commit_message_subject=commit_subject,
                 commit_message_body=commit_body,
                 dry_run=bool(dry_run),
@@ -625,8 +674,6 @@ def register(mcp):
                 "topic": topic,
                 "target_path": target_path,
                 "target_section": target_section,
-                "confidence": round(confidence, 3),
-                "supporting_insights": supporting_payload,
             })
 
             # Optional: push + open GitHub PR.
