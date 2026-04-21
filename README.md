@@ -437,6 +437,112 @@ the use of this project. Use at your own risk.**
 
 ---
 
+## Zero-cost alternative — fully offline with Ollama
+
+If you want to avoid paid APIs entirely, set `EMBED_BACKEND=local` and
+embed locally via [Ollama](https://ollama.com). The backend is wired
+at `mcp/memory/embedders/local.py` and speaks Ollama's HTTP API — **no
+outbound calls, no cloud keys, no billing surface**. Recurring cost:
+electricity only.
+
+### Two caveats to know up-front
+
+1. **Text only.** The local backend declares `modalities =
+   frozenset({"text"})`. Markdown (`.md`, `.mdx`) ingest works; PDF,
+   image, video and audio files are rejected by the reconciler with a
+   clear error surfaced in `/health.ingest.errors` — **nothing is
+   silently skipped or billed**. If you need multimodal embedding
+   offline, you'll need a CLIP-style model; that's not wired in this
+   template and is out of scope for the `local` backend today.
+2. **No Matryoshka truncation.** `EMBED_DIM` must exactly match the
+   model's native output dimension (set `LOCAL_EMBED_DIM` to the same
+   value). Switching to `local` from a DB previously populated with
+   `gemini-*` (1536-dim) requires a schema reset because the
+   `vector(N)` column dimension changes — see "Switching backends"
+   below.
+
+### Install + run Ollama on the host
+
+```bash
+# macOS / Linux: one-line install
+curl -fsSL https://ollama.com/install.sh | sh
+
+# Pick an embedding model (see comparison below); bge-m3 is the default
+ollama pull bge-m3
+
+# Start the daemon if it isn't already running under launchd/systemd
+ollama serve &
+```
+
+Verify: `curl -s http://127.0.0.1:11434/api/tags` returns JSON with the
+model you just pulled.
+
+### Configure `.env`
+
+```bash
+# --- Local embedder ---
+EMBED_BACKEND=local
+EMBED_DIM=1024                # MUST match LOCAL_EMBED_DIM exactly
+LOCAL_EMBED_DIM=1024          # native dim of the chosen Ollama model
+OLLAMA_MODEL=bge-m3           # or any model you pulled
+OLLAMA_HOST=http://127.0.0.1:11434
+```
+
+**Reaching Ollama from the MCP container.** When `mcp` runs in Docker
+and Ollama is on the host, loopback doesn't resolve — use the
+platform-specific host alias:
+
+| Host OS | `OLLAMA_HOST` |
+|---|---|
+| macOS / Windows (Docker Desktop) | `http://host.docker.internal:11434` |
+| Linux (default docker0 bridge) | `http://172.17.0.1:11434` |
+
+### Recommended embedding models
+
+All are available via `ollama pull`. Pick one based on language coverage
+and hardware.
+
+| Model | Native dim | MTEB quality | Language | Pull command |
+|---|---|---|---|---|
+| `bge-m3` | 1024 | ⭐⭐⭐⭐ | Multilingual (100+ langs, EN/IT/ES/…) | `ollama pull bge-m3` |
+| `mxbai-embed-large` | 1024 | ⭐⭐⭐⭐ | English-focused | `ollama pull mxbai-embed-large` |
+| `nomic-embed-text` | 768 | ⭐⭐⭐ | English, faster on small hardware | `ollama pull nomic-embed-text` |
+
+Whatever you pick, **`LOCAL_EMBED_DIM` must match the model's output
+dimension**, otherwise the backend fails fast with
+`BackendError: model returned dim=X, expected native_dim=Y`.
+
+### Switching backends — destructive DB reset
+
+Because pgvector columns are typed with a fixed dimension, you cannot
+switch between backends of different dim without recreating the
+`memories.embedding` column. The safe path is a full volume wipe:
+
+```bash
+docker compose down -v      # drop pgvector + mcp_data
+# edit .env to the new backend + matching EMBED_DIM
+docker compose up -d --build
+```
+
+You will re-ingest everything from `docs/` under the new backend. With
+`local` this is free (Ollama is local) but takes CPU/GPU time; budget
+a few seconds per chunk on a modern laptop.
+
+### When to still prefer the cloud backends
+
+- You need **multimodal** (PDF / image / video / audio) — stay on
+  `gemini-2-preview`.
+- Your corpus is **small** (a few hundred markdown chunks) and
+  installing Ollama is more friction than paying cents. `gemini-001`
+  on the free tier often covers this for zero cost.
+- You want **consistent quality** across machines — Ollama embedding
+  quality varies with the hardware and the model version; Gemini is
+  version-pinned.
+
+See [`.env.example`](.env.example) for the full list of `OLLAMA_*` knobs.
+
+---
+
 ## Quick start with Docker (2 minutes)
 
 The fastest way to try Aleph Docs: `docker compose up`. A single command
