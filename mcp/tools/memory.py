@@ -55,12 +55,18 @@ def register(mcp):
         transcripts, PDF page text, images, video keyframes, PDF pages,
         insights and past interactions — in a single pass.
 
-        Covers all 9 memory kinds: doc_chunk, interaction, insight
-        (text), image, video_scene, audio_clip, pdf_page (media,
-        visual/acoustic embedding), and video_transcript /
-        audio_transcript (text embedding of Whisper output on the
-        paired scene/clip). Results are ranked by similarity x
-        forgetting-curve decay. Each hit is reinforced atomically.
+        Covers all 10 memory kinds:
+          TEXT        : doc_chunk, insight, interaction
+          MEDIA       : image, video_scene, audio_clip, pdf_page
+                        (embedded via the visual / acoustic side of
+                        the backend when it supports that modality)
+          TRANSCRIPTS : video_transcript, audio_transcript, pdf_text
+                        (text embedding of Whisper output or extracted
+                        PDF text on the paired source — always works
+                        even on text-only backends)
+
+        Results are ranked by similarity x forgetting-curve decay.
+        Each hit is reinforced atomically.
 
         TIP for course / narrated content: filter with
         kind="video_transcript" or "audio_transcript" when you want
@@ -71,9 +77,9 @@ def register(mcp):
         Args:
             query: Natural-language query.
             kind: Optional filter — one of:
-                'doc_chunk', 'interaction', 'insight',
+                'doc_chunk', 'insight', 'interaction',
                 'image', 'video_scene', 'audio_clip', 'pdf_page',
-                'video_transcript', 'audio_transcript'.
+                'video_transcript', 'audio_transcript', 'pdf_text'.
                 When None (default), searches across every kind.
             limit: Max results (1-50, default 10).
             min_score: Minimum score to include. When None (default),
