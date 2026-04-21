@@ -81,12 +81,16 @@ def _project_and_cluster(embeddings: np.ndarray) -> tuple[np.ndarray, list[int |
     import umap  # type: ignore
     import hdbscan  # type: ignore
 
-    n_neighbors = max(2, min(30, n - 1))
+    # Domain-uniform corpora (single-course transcripts, single-topic docs)
+    # collapse into a dense blob with min_dist=0.35 because intra-cluster
+    # cosines are ~0.5-0.7. Higher min_dist + lower n_neighbors opens up
+    # local structure without losing the global topology.
+    n_neighbors = max(2, min(15, n - 1))
     reducer = umap.UMAP(
         n_components=3,
         metric="cosine",
         random_state=42,
-        min_dist=0.35,
+        min_dist=0.6,
         spread=1.5,
         n_neighbors=n_neighbors,
     )
