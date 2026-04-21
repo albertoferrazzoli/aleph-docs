@@ -1,4 +1,12 @@
-"""Navigation tools: sections, page trees, page lists."""
+"""Navigation tools: sections, page trees, page lists.
+
+SCOPE: every tool in this module queries the SQLite `pages` table,
+which only indexes Markdown files (`.md`/`.mdx`) under the docs root.
+Video transcripts, audio transcripts, PDF text and images live in the
+pgvector `memories` table and are NOT visible here. For a full corpus
+overview across all 10 memory kinds use `memory_stats`. For content
+retrieval across every kind use `search`.
+"""
 
 import fnmatch
 
@@ -8,9 +16,13 @@ from helpers import db_conn, error_response
 def register(mcp):
     @mcp.tool()
     def list_sections() -> dict:
-        """List top-level documentation sections with their page counts.
+        """⚠ MARKDOWN ONLY — list top-level Markdown sections.
 
-        Typical sections: 'guides', 'reference', 'api' (adapt to your own sections).
+        Returns sections of the `pages` (Markdown) index. This will
+        under-count corpora that include videos, audio or PDFs. To
+        see the full corpus composition across every memory kind
+        call `memory_stats` instead. For content lookup across any
+        kind use `search`.
         """
         try:
             with db_conn() as conn:
@@ -24,7 +36,10 @@ def register(mcp):
 
     @mcp.tool()
     def get_page_tree(section: str) -> dict:
-        """Return a hierarchical tree of pages within a section.
+        """⚠ MARKDOWN ONLY — hierarchical tree of Markdown pages.
+
+        Video / audio / PDF content is not represented here. Use
+        `memory_stats` for the full corpus breakdown.
 
         Args:
             section: Section name ('guides', 'reference', 'api').
@@ -48,7 +63,12 @@ def register(mcp):
 
     @mcp.tool()
     def list_pages(section: str | None = None, pattern: str | None = None) -> dict:
-        """List pages as a flat list, optionally filtered by section and glob pattern.
+        """⚠ MARKDOWN ONLY — flat list of Markdown pages.
+
+        This is *not* a corpus overview — it sees only the Markdown
+        index, so a zero / small result does not mean the corpus is
+        empty. For "what is in this corpus?" call `memory_stats`.
+        For content retrieval use `search`.
 
         Args:
             section: Optional section filter.

@@ -8,10 +8,13 @@ from helpers import db_conn, error_response
 def register(mcp):
     @mcp.tool()
     def get_doc_stats() -> dict:
-        """Return statistics about the indexed Aleph documentation.
+        """⚠ MARKDOWN ONLY — stats for the Markdown docs index.
 
-        Includes total pages, code blocks, sections with their counts,
-        last indexed commit hash and timestamp.
+        Returns counts from the SQLite `pages` / `code_blocks` tables.
+        Does NOT include videos, audio, PDFs or images — those live in
+        the pgvector memories store. For a full corpus breakdown by
+        memory kind (video_transcript, image, pdf_text, …) call
+        `memory_stats` instead.
         """
         try:
             with db_conn() as conn:

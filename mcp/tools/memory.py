@@ -446,11 +446,20 @@ def register(mcp):
 
     @mcp.tool()
     async def memory_stats() -> dict:
-        """Return exact counts of memory rows by kind.
+        """⭐ CORPUS OVERVIEW — exact counts of every memory kind.
 
-        Use this when the user asks how many memories / docs / images / etc.
-        are stored. `semantic_search` is capped at 50 results and doesn't
-        expose totals — this tool queries the underlying table directly.
+        Call this FIRST whenever the user asks "what is in the
+        corpus / docs / course / library?", or before deciding
+        whether the store is empty. Returns counts across all 10
+        kinds (doc_chunk / insight / interaction / image /
+        video_scene / audio_clip / pdf_page / video_transcript /
+        audio_transcript / pdf_text) so you can see the real
+        composition — including video courses, audio recordings and
+        PDFs that the Markdown-only navigation tools (list_pages,
+        list_sections, get_doc_stats) miss.
+
+        For content lookup once you know a kind is populated, call
+        `search`.
         """
         try:
             counts = await store.count_by_kind()
