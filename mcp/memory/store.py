@@ -478,6 +478,69 @@ async def upsert_media_chunk(
 
     async with db.get_conn() as conn:
         async with conn.cursor() as cur:
+            # Idempotency: if a row for the same (kind, media_ref) tuple
+            # already exists AND the source hash is unchanged, reuse it
+            # instead of inserting a duplicate. Without this guard every
+            # markdown rebuild multiplies image rows once per referencing
+            # .md file, per rebuild — a 178-image corpus balloons to
+            # thousands of rows in a few switches.
+            if chunk.media_ref:
+                await cur.execute(
+                    "SELECT id, metadata->>'source_sha256' "
+                    "FROM memories "
+                    "WHERE kind = %s AND media_ref = %s "
+                    "LIMIT 1",
+                    (chunk.kind, chunk.media_ref),
+                )
+                existing = await cur.fetchone()
+                if existing is not None:
+                    existing_id, existing_sha = existing
+                    if source_sha256 and existing_sha == source_sha256:
+                        # Same file, same content — no-op, return the
+                        # existing row. We intentionally skip the
+                        # embed cost too (caller has already paid it
+                        # via embeddings.embed_batch above, but the
+                        # row stays unique).
+                        return {
+                            "id": str(existing_id),
+                            "kind": chunk.kind,
+                            "media_type": chunk.media_type,
+                            "deduplicated": True,
+                        }
+                    # Different hash (or no hash to compare): update the
+                    # existing row in place with the fresh embedding +
+                    # content + metadata. No new row.
+                    await cur.execute(
+                        "UPDATE memories SET "
+                        "  content = %s, source_path = %s, "
+                        "  metadata = %s::jsonb, embedding = %s, "
+                        "  media_type = %s, preview_b64 = %s, "
+                        "  last_access_at = now() "
+                        "WHERE id = %s",
+                        (
+                            chunk.content, resolved_source_path,
+                            json.dumps(meta), _vec(emb),
+                            chunk.media_type, chunk.preview_b64,
+                            existing_id,
+                        ),
+                    )
+                    await conn.commit()
+                    new_id = str(existing_id)
+                    await audit.record(
+                        "update",
+                        subject_id=new_id,
+                        actor=actor,
+                        kind=chunk.kind,
+                        content=chunk.content,
+                        metadata={"media_ref": chunk.media_ref},
+                    )
+                    return {
+                        "id": new_id,
+                        "kind": chunk.kind,
+                        "media_type": chunk.media_type,
+                        "updated": True,
+                    }
+
             await cur.execute(
                 "INSERT INTO memories "
                 "  (kind, content, source_path, metadata, embedding, "
