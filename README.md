@@ -3,6 +3,15 @@
 **A reusable template for a documentation-aware LLM knowledge system that
 learns from use — across Markdown, images, video, audio and PDF.**
 
+> **What's new (April 2026)** — zero-cost cross-modal retrieval via
+> `EMBED_BACKEND=nomic_multimodal_local` (text + image in the same
+> 768-dim latent space, running on a tiny host-side FastAPI server —
+> no cloud, no API key, no per-request cost). One unified `search`
+> MCP tool covers all 10 memory kinds with modality-aware score
+> auto-tuning. See [docs/EMBED_NOMIC_SETUP.md](docs/EMBED_NOMIC_SETUP.md)
+> for setup and the [zero-cost multimodal section](#adding-image--video-keyframe-retrieval--nomic_multimodal_local)
+> below for the config.
+
 ![Aleph viewer — 3D semantic memory graph over a real docs corpus](assets/aleph-viewer.png)
 
 *The Aleph 3D viewer on a live instance: blue nodes are `doc_chunk` memories
@@ -140,7 +149,8 @@ a few cents a year to maintain, and never loses the audit trail.
 | Capability | Implementation |
 |---|---|
 | **Multimodal corpora** | Markdown / images / video / audio / PDF indexed side by side into one pgvector space |
-| **Pluggable embedders** | `gemini-001` / `gemini-2-preview` / `local` (Ollama) selectable via `EMBED_BACKEND` env |
+| **Pluggable embedders** | Four backends selectable via `EMBED_BACKEND`: `gemini-001` (cheap cloud text), `gemini-2-preview` (multimodal cloud), `local` (Ollama, free text-only), **`nomic_multimodal_local`** (free text + image in the same 768-dim space, via host-side FastAPI — see [docs/EMBED_NOMIC_SETUP.md](docs/EMBED_NOMIC_SETUP.md)) |
+| **Unified retrieval** | One `search(query, kind?)` tool covers all 10 memory kinds (doc_chunk / insight / interaction / image / video_scene / audio_clip / pdf_page / video_transcript / audio_transcript / pdf_text). `min_score` auto-tunes per modality so visual hits aren't silently filtered out. `memory_stats()` gives the per-kind corpus overview |
 | Lexical search over docs | SQLite FTS5, kept in sync incrementally — `git diff` in git mode, `watchdog` + SHA-256 diff in local mode |
 | Semantic search (docs + insights + interactions, across modalities) | pgvector HNSW with cosine + Ebbinghaus decay (canonical kinds — docs, images, pdf pages, video scenes, audio clips — are exempt from decay and never fall off) |
 | Auto-reinforcement | Every hit bumps `stability × 1.7`, `access_count += 1` |
@@ -185,7 +195,8 @@ aleph-docs/
 │   │   │   ├── base.py       # Backend protocol + BackendError
 │   │   │   ├── gemini_001.py # text-only, default
 │   │   │   ├── gemini_2.py   # multimodal preview
-│   │   │   └── local.py      # Ollama offline
+│   │   │   ├── local.py      # Ollama offline (text-only)
+│   │   │   └── nomic_multimodal_local.py  # 768-dim text+image via host server
 │   │   ├── embeddings.py     # thin shim forwarding to the active backend
 │   │   ├── chunker.py        # H2/H3-aware markdown chunking
 │   │   ├── chunker_image.py  # image → 1 MediaChunk
@@ -208,13 +219,18 @@ aleph-docs/
 │   │   ├── navigation.py     # list_sections, get_page_tree, list_pages
 │   │   ├── content.py        # get_page, get_page_section, get_code_blocks
 │   │   ├── meta.py           # get_doc_stats, get_changelog
-│   │   └── memory.py         # semantic_search, remember, remember_media, recall,
+│   │   └── memory.py         # search (unified), remember, remember_media, recall,
 │   │                         # forget, audit_history, memory_stats, find_doc_gaps,
 │   │                         # suggest_doc_update, propose_doc_patch,
 │   │                         # lint_run, lint_findings, lint_resolve
 │   ├── systemd/              # service + timer units (templates)
 │   ├── tests/                # pytest (pytest-postgresql)
+│   │   └── smoke_nomic_multimodal.sh  # end-to-end coverage check
 │   └── deploy-mcp.sh         # idempotent production deploy script
+│
+├── docker/nomic-embed-server/ # host-side Nomic embed server (only used when
+│   ├── server.py             # EMBED_BACKEND=nomic_multimodal_local). FastAPI
+│   └── requirements.txt      # on MPS/CUDA/CPU; see docs/EMBED_NOMIC_SETUP.md
 │
 └── aleph/                    # the 3D viewer
     ├── backend/              # FastAPI on 8765, reuses mcp.memory
