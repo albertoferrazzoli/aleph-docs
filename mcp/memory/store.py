@@ -499,8 +499,12 @@ async def search(
     WITH hits AS (
         SELECT id, kind, content, source_path, source_section, metadata,
                1 - (embedding <=> %s) AS similarity,
-               EXP(-EXTRACT(EPOCH FROM (now() - last_access_at))
-                   / 86400.0 / stability) AS decay,
+               CASE
+                   WHEN kind IN ('doc_chunk','image','pdf_page','video_scene','audio_clip')
+                       THEN 1.0
+                   ELSE EXP(-EXTRACT(EPOCH FROM (now() - last_access_at))
+                            / 86400.0 / stability)
+               END AS decay,
                access_count, stability, last_access_at, created_at
         FROM memories
         {where_clause}
