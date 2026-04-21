@@ -477,7 +477,26 @@ system-prompt template that teaches Claude when to use which tool.
 
 ## License
 
-See [`LICENSE`](LICENSE). Template code is MIT unless otherwise noted.
+**PolyForm Noncommercial License 1.0.0** — see [`LICENSE`](LICENSE).
+
+Free to use, modify and distribute for any **noncommercial** purpose:
+personal projects, research, education, charity, public-safety or
+government work, study, hobby. No royalties, no attribution friction
+beyond the license notice.
+
+For **commercial use** (inside a for-profit product, paid service,
+internal tooling at a for-profit company, or any activity with
+anticipated commercial application), a separate commercial licence is
+required — contact **alberto.ferrazzoli@gmail.com**.
+
+Why PolyForm NC and not MIT: Aleph Docs is a full-stack template for
+a specific production pattern (multimodal MCP + semantic memory +
+3D viewer). Keeping commercial use gated while leaving the code fully
+open for exploration and non-profit adoption is the arrangement that
+lets development continue.
+
+> Prior versions tagged before this license change remain available
+> under MIT. Only the post-change tree is covered by PolyForm NC.
 
 ---
 
