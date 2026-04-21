@@ -49,3 +49,4 @@ docs/guides/*
 *.bak
 *.bak.*
 .worktrees/
+.claude/commands/*
