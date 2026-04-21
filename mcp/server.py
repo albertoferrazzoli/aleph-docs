@@ -181,20 +181,31 @@ if __name__ == "__main__":
                                 # DBs thanks to SHA256 idempotency.
                                 try:
                                     from memory.ingest_task import get_ingest_task as _git
+                                    from memory import db as _memdb, workspace_manager as _wmgr
                                     from pathlib import Path as _P
 
-                                    async def _kick():
+                                    # Capture the DSN NOW — if the user
+                                    # switches again while this ingest
+                                    # is running, the override pool keeps
+                                    # writing to the workspace this run
+                                    # was kicked for.
+                                    _ingest_dsn = os.environ.get("PG_DSN", "")
+                                    _ingest_ws_name = match.name
+                                    _ingest_root = match.docs_path
+
+                                    async def _kick(dsn=_ingest_dsn, ws_name=_ingest_ws_name, root=_ingest_root):
                                         try:
-                                            it2 = _git()
-                                            await it2.run_once(
-                                                mode="local",
-                                                root=_P(match.docs_path),
-                                                repo_root=_P(match.docs_path),
-                                                content_sub="",
-                                            )
+                                            async with _memdb.pool_override(dsn):
+                                                it2 = _git()
+                                                await it2.run_once(
+                                                    mode="local",
+                                                    root=_P(root),
+                                                    repo_root=_P(root),
+                                                    content_sub="",
+                                                )
                                         except Exception as e:
                                             print(f"[workspaces] post-switch "
-                                                  f"ingest failed: {e}")
+                                                  f"ingest for {ws_name!r} failed: {e}")
 
                                     asyncio.create_task(_kick())
                                 except Exception as e:
@@ -224,9 +235,16 @@ if __name__ == "__main__":
             ).lower() == "true"
             it = get_ingest_task()
 
-            async def _bg():
+            # Pin the boot-time ingest to the DSN we booted on. If the
+            # user switches workspaces while this is still running,
+            # the override pool ensures writes land in the original DB.
+            _boot_dsn = os.environ.get("PG_DSN", "")
+
+            async def _bg(dsn=_boot_dsn):
                 try:
-                    summary = await it.run_once()
+                    from memory import db as _memdb
+                    async with _memdb.pool_override(dsn):
+                        summary = await it.run_once()
                     print(
                         f"[ingest] initial media reconcile done: "
                         f"+{summary.added} ~{summary.updated} "

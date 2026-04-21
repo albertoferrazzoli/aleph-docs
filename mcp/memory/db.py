@@ -7,6 +7,7 @@ keeps working (backward compatible) even when Postgres is unavailable.
 
 from __future__ import annotations
 
+import contextvars
 import logging
 import os
 from contextlib import asynccontextmanager
@@ -21,6 +22,15 @@ class MemoryDisabled(RuntimeError):
 
 _pool: Optional["AsyncConnectionPool"] = None  # type: ignore[name-defined]
 _enabled: bool = False
+
+# When a background task (typically an ingest) needs to pin its writes
+# to a specific workspace even across runtime workspace switches, it
+# sets this ContextVar to a dedicated pool. `get_conn()` will route
+# through that override instead of the module singleton, so a mid-
+# flight reconcile won't leak into a new workspace's DB when the user
+# switches from the viewer.
+_override_pool_var: contextvars.ContextVar[Optional["AsyncConnectionPool"]] = \
+    contextvars.ContextVar("memory_db_override_pool", default=None)
 
 
 def _read_env() -> tuple[bool, str]:
@@ -99,13 +109,24 @@ async def close_pool() -> None:
 async def get_conn():
     """Async context manager yielding a pooled connection.
 
-    Self-heals a dropped pool: if the memory subsystem is enabled in
-    env but `_pool` is None (e.g. a previous workspace switch closed
-    it and never re-opened, or a LISTEN/NOTIFY crash nuked it), we
-    attempt one re-init before giving up. Raises MemoryDisabled only
-    if env says memory is off or the re-init itself fails.
+    Routing, in order:
+      1. If an override pool is set on the current ContextVar (via
+         `pool_override()`), use that. This is what pins a background
+         ingest to its originating workspace so a runtime workspace
+         switch cannot redirect its writes.
+      2. Otherwise use the module-level pool, self-healing it if it's
+         been closed but env still says memory is enabled.
+
+    Raises MemoryDisabled when no pool is available.
     """
     global _pool, _enabled
+
+    override = _override_pool_var.get()
+    if override is not None:
+        async with override.connection() as conn:
+            yield conn
+            return
+
     if _pool is None:
         # Try to recover — cheap and idempotent.
         try:
@@ -118,6 +139,43 @@ async def get_conn():
         raise MemoryDisabled("memory subsystem is disabled or not initialized")
     async with _pool.connection() as conn:
         yield conn
+
+
+@asynccontextmanager
+async def pool_override(dsn: str):
+    """Pin all `get_conn()` calls inside this async task (and its
+    children) to a dedicated pool bound to `dsn`, regardless of what
+    the module-level pool points at.
+
+    Use this to isolate a background reconcile from concurrent
+    workspace switches — the task keeps writing to the database it
+    started on even if the user flips the active workspace in the
+    viewer halfway through.
+
+    Safe to nest (inner override wins). Pool is created on enter and
+    fully closed on exit, so this is NOT appropriate for tight loops
+    — callers should wrap entire task bodies, not individual queries.
+    """
+    from psycopg_pool import AsyncConnectionPool
+
+    max_size = max(1, int(os.getenv("PG_POOL_MAX", "4")) // 2)
+    pool = AsyncConnectionPool(
+        conninfo=dsn,
+        min_size=1,
+        max_size=max_size,
+        configure=_configure_connection,
+        open=False,
+    )
+    await pool.open()
+    token = _override_pool_var.set(pool)
+    try:
+        yield pool
+    finally:
+        _override_pool_var.reset(token)
+        try:
+            await pool.close()
+        except Exception as e:  # pragma: no cover
+            log.warning("[memory] pool_override close failed: %s", e)
 
 
 async def health_check() -> dict:

@@ -523,22 +523,34 @@ def register(mcp):
                 }
             summary = await workspace_manager.activate(ws)
             if reindex:
-                # Fire-and-forget reconcile — progress shows up on /health.
+                # Fire-and-forget reconcile, pinned to this workspace's
+                # DSN via pool_override so a concurrent switch in the
+                # viewer can't redirect the writes mid-run. Progress
+                # shows up on /health.
                 import asyncio
+                import os as _os
+                from memory import db as _memdb
                 from memory.ingest_task import get_ingest_task
                 from pathlib import Path as _Path
+                _ingest_dsn = _os.environ.get("PG_DSN", "")
+                _ingest_root = ws.docs_path
+                _ingest_name = ws.name
                 it = get_ingest_task()
 
-                async def _kick():
+                async def _kick(dsn=_ingest_dsn, root=_ingest_root, name=_ingest_name):
                     try:
-                        await it.run_once(
-                            mode="local",
-                            root=_Path(ws.docs_path),
-                            repo_root=_Path(ws.docs_path),
-                            content_sub="",
-                        )
+                        async with _memdb.pool_override(dsn):
+                            await it.run_once(
+                                mode="local",
+                                root=_Path(root),
+                                repo_root=_Path(root),
+                                content_sub="",
+                            )
                     except Exception as e:
-                        log.warning("[workspaces] post-switch reconcile failed: %s", e)
+                        log.warning(
+                            "[workspaces] post-switch reconcile for %r failed: %s",
+                            name, e,
+                        )
 
                 asyncio.create_task(_kick())
                 summary["reindex"] = "kicked"
