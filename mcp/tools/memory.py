@@ -17,7 +17,14 @@ from memory.types import MediaChunk
 
 log = logging.getLogger("memory")
 
-_MEDIA_KINDS = frozenset({"image", "pdf_page", "video_scene", "audio_clip"})
+_MEDIA_KINDS = frozenset({
+    "image", "pdf_page", "video_scene", "audio_clip",
+    # Paired text-embedded rows — one per scene/clip when ASR
+    # produced a transcript. Share source_path + media_ref with the
+    # visual / audio row. Queryable via semantic_search with
+    # kind="video_transcript" / "audio_transcript".
+    "video_transcript", "audio_transcript",
+})
 _ALL_KINDS = frozenset({"doc_chunk", "interaction", "insight"}) | _MEDIA_KINDS
 
 
@@ -42,10 +49,18 @@ def register(mcp):
                               limit: int = 10, min_score: float = 0.15) -> dict:
         """Semantic vector search across the unified memory.
 
-        Covers all 7 memory kinds: doc_chunk, interaction, insight (text),
-        and image, video_scene, audio_clip, pdf_page (media). Results are
-        ranked by similarity x forgetting-curve decay. Each hit is
-        reinforced atomically.
+        Covers all 9 memory kinds: doc_chunk, interaction, insight
+        (text), image, video_scene, audio_clip, pdf_page (media,
+        visual/acoustic embedding), and video_transcript /
+        audio_transcript (text embedding of Whisper output on the
+        paired scene/clip). Results are ranked by similarity x
+        forgetting-curve decay. Each hit is reinforced atomically.
+
+        TIP for course / narrated content: filter with
+        kind="video_transcript" or "audio_transcript" when you want
+        the text of what the speaker says. The visual `video_scene`
+        row is paired with the same media_ref so you can still
+        surface the clickable scene link to the user afterwards.
 
         NOTE on min_score for cross-modal queries: text->image/video/audio
         cosine similarities run lower (~0.2–0.45) than text->text
@@ -57,7 +72,8 @@ def register(mcp):
             query: Natural-language query.
             kind: Optional filter - one of:
                 'doc_chunk', 'interaction', 'insight',
-                'image', 'video_scene', 'audio_clip', 'pdf_page'.
+                'image', 'video_scene', 'audio_clip', 'pdf_page',
+                'video_transcript', 'audio_transcript'.
             limit: Max results (1-50, default 10).
             min_score: Minimum score to include (default 0.15).
         """
@@ -328,7 +344,7 @@ def register(mcp):
             return {"error": f"file not found: {path}"}
 
         try:
-            chunks = _route_media(p, caption=caption)
+            chunks = await _route_media(p, caption=caption)
             inserted = []
             for chunk in chunks:
                 res = await store.upsert_media_chunk(

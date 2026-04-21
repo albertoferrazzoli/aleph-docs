@@ -6,13 +6,15 @@ import * as THREE from 'three';
 import { useRef, useEffect } from 'react';
 
 const KIND_COLOR = {
-  doc_chunk:   new THREE.Color('#7dd3fc'),  // sky blue
-  interaction: new THREE.Color('#fbbf24'),  // amber
-  insight:     new THREE.Color('#f472b6'),  // pink
-  image:       new THREE.Color('#4ade80'),  // green
-  video_scene: new THREE.Color('#fb7185'),  // coral
-  audio_clip:  new THREE.Color('#a78bfa'),  // violet
-  pdf_page:    new THREE.Color('#f97316'),  // orange
+  doc_chunk:        new THREE.Color('#7dd3fc'),  // sky blue
+  interaction:      new THREE.Color('#fbbf24'),  // amber
+  insight:          new THREE.Color('#f472b6'),  // pink
+  image:            new THREE.Color('#4ade80'),  // green
+  video_scene:      new THREE.Color('#fb7185'),  // coral
+  audio_clip:       new THREE.Color('#a78bfa'),  // violet
+  pdf_page:         new THREE.Color('#f97316'),  // orange
+  video_transcript: new THREE.Color('#fca5a5'),  // lighter coral — paired with video_scene
+  audio_transcript: new THREE.Color('#c4b5fd'),  // lighter violet — paired with audio_clip
 };
 const DEFAULT_KIND = new THREE.Color('#94a3b8');
 

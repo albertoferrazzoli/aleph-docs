@@ -34,13 +34,22 @@ def is_supported_media(path: Path) -> bool:
     return path.suffix.lower() in MEDIA_ROUTES
 
 
-def route_media(path: Path, *, caption: str | None = None) -> List[MediaChunk]:
+async def route_media(
+    path: Path, *, caption: str | None = None,
+) -> List[MediaChunk]:
     """Dispatch a media file to its chunker based on extension.
 
-    Mirrors the behaviour previously in `tools/memory.py:_route_media`:
-    image → single chunk; video/audio/pdf → one chunk per segment/page,
-    with tempdirs stashed in metadata['_tmpdir'] so callers can reap
-    them after all upserts.
+    Image and PDF chunkers are synchronous CPU work; video and audio
+    are async because they may invoke the ASR backend (network or
+    Whisper inference).
+
+    image → 1 chunk (or more, when a PDF yields embedded images).
+    video/audio → N chunks per segment/clip, with an optional paired
+                   text_transcript chunk when ASR returned text.
+    pdf → 1 chunk per page + N image chunks per embedded raster.
+
+    Tempdirs (for video/audio derived files) are stashed in
+    ``metadata['_tmpdir']`` so callers can reap them after all upserts.
     """
     suffix = path.suffix.lower()
     modality = MEDIA_ROUTES.get(suffix)
@@ -57,7 +66,9 @@ def route_media(path: Path, *, caption: str | None = None) -> List[MediaChunk]:
     if modality == "video":
         from .chunker_video import chunk_video
         tmpdir = tempfile.mkdtemp(prefix="aleph-video-")
-        chunks = chunk_video(path, out_dir=Path(tmpdir), caption=caption)
+        chunks = await chunk_video(
+            path, out_dir=Path(tmpdir), caption=caption,
+        )
         if not chunks:
             raise RuntimeError(f"chunk_video returned no scenes for {path}")
         for c in chunks:
@@ -67,7 +78,9 @@ def route_media(path: Path, *, caption: str | None = None) -> List[MediaChunk]:
     if modality == "audio":
         from .chunker_audio import chunk_audio
         tmpdir = tempfile.mkdtemp(prefix="aleph-audio-")
-        chunks = chunk_audio(path, out_dir=Path(tmpdir), transcript=caption)
+        chunks = await chunk_audio(
+            path, out_dir=Path(tmpdir), transcript=caption,
+        )
         if not chunks:
             raise RuntimeError(f"chunk_audio returned no clips for {path}")
         for c in chunks:

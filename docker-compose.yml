@@ -75,6 +75,20 @@ services:
       # Reconciler: set false to skip the boot-time media scan and rely
       # only on the watcher (local mode) or on-demand reindex_docs().
       INGEST_MEDIA_ON_BOOT: ${INGEST_MEDIA_ON_BOOT:-true}
+      # ASR backend selection — one of whisper_local (default, free),
+      # openai ($0.006/min), gemini (~$0.01/min). See README.
+      ASR_BACKEND: ${ASR_BACKEND:-whisper_local}
+      ASR_ENABLED: ${ASR_ENABLED:-true}
+      ASR_LANGUAGE: ${ASR_LANGUAGE:-}
+      ASR_TIMEOUT_S: ${ASR_TIMEOUT_S:-600}
+      # whisper_local backend — host bridge and model choice.
+      ASR_HOST: ${ASR_HOST:-}
+      ASR_MODEL: ${ASR_MODEL:-large-v3}
+      # openai backend — requires OPENAI_API_KEY.
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ASR_OPENAI_MODEL: ${ASR_OPENAI_MODEL:-whisper-1}
+      # gemini backend — reuses GOOGLE_API_KEY above.
+      ASR_GEMINI_MODEL: ${ASR_GEMINI_MODEL:-gemini-2.5-flash}
       # Lint
       LINT_MODE: ${LINT_MODE:-auto}
       # Optional: doc-patch PR back to canonical git

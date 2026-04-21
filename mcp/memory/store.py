@@ -356,12 +356,20 @@ async def insert_insight(
 
 
 # Which `MediaChunk.kind` values map to which backend modality capability.
+# `*_transcript` kinds are text-embedded (the transcript string IS the
+# embed input) — they pass through any backend that supports text.
 _KIND_TO_MODALITY = {
     "image": "image",
     "video_scene": "video",
     "audio_clip": "audio",
     "pdf_page": "pdf",
+    "video_transcript": "text",
+    "audio_transcript": "text",
 }
+
+# Kinds that embed `chunk.content` (a transcript string) instead of
+# `chunk.path` (a media file). The path field is expected to be None.
+_TEXT_EMBEDDING_KINDS = frozenset({"video_transcript", "audio_transcript"})
 
 
 async def upsert_media_chunk(
@@ -413,14 +421,26 @@ async def upsert_media_chunk(
             f"(e.g. 'gemini-2-preview')."
         )
 
-    if chunk.path is None:
-        raise RuntimeError(
-            f"upsert_media_chunk: chunk.path is None for kind={chunk.kind!r}"
-        )
+    # Text-embedded kinds (*_transcript) pass the transcript string to
+    # the embedder; media kinds pass the file path so the backend reads
+    # bytes itself.
+    if chunk.kind in _TEXT_EMBEDDING_KINDS:
+        if not (chunk.content and chunk.content.strip()):
+            raise RuntimeError(
+                f"upsert_media_chunk: chunk.content is empty for "
+                f"text-embedded kind={chunk.kind!r}"
+            )
+        embed_input = chunk.content
+    else:
+        if chunk.path is None:
+            raise RuntimeError(
+                f"upsert_media_chunk: chunk.path is None for kind={chunk.kind!r}"
+            )
+        embed_input = chunk.path
 
     # Embed via the shared embeddings shim so tests can monkeypatch it.
     # It forwards to the active backend with EMBED_DIM guarding.
-    vectors = await embeddings.embed_batch([chunk.path])
+    vectors = await embeddings.embed_batch([embed_input])
     if not vectors:
         raise RuntimeError("upsert_media_chunk: backend returned no vectors")
     emb = vectors[0]

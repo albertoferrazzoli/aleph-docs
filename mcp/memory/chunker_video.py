@@ -1,18 +1,27 @@
-"""Video → one MediaChunk per scene.
+"""Video → paired MediaChunks per scene (video + transcript).
 
-No embedding happens here; that is deferred to
-``store.upsert_media_chunk``. The chunker extracts keyframes via
-ffmpeg scene-detection (or a fixed interval fallback), then trims a
-segment file per scene that the backend can later embed.
+Per scene we emit:
+  - one ``video_scene`` chunk whose embedding is computed from the
+    segment .mp4 by the multimodal backend (existing behaviour)
+  - optionally, one ``video_transcript`` chunk whose ``content`` is
+    the Whisper transcript of the same segment and whose embedding
+    is computed as TEXT (cheap, works with any backend)
+
+The transcript chunk is only emitted when ASR actually returns text.
+When the ASR backend is disabled, unreachable, or the segment is
+silent, we silently fall back to the legacy "scene N @ Xs" content
+on the video_scene row with zero transcript row — so ingest never
+fails because of ASR.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 from typing import List
 
-from . import ffmpeg_utils, media
+from . import asr, ffmpeg_utils, media
 from .types import MediaChunk
 
 logger = logging.getLogger("memory")
@@ -49,25 +58,29 @@ def _pick_segment_bounds(scene_times: list[float], duration: float) -> list[tupl
     return bounds or [(0.0, min(duration, ffmpeg_utils.VIDEO_SEGMENT_MAX_S))]
 
 
-def chunk_video(
+async def chunk_video(
     path: Path,
     out_dir: Path,
     caption: str | None = None,
 ) -> List[MediaChunk]:
-    """Probe, keyframe, segment; return one :class:`MediaChunk` per scene.
+    """Probe, keyframe, segment; return one or two MediaChunks per scene.
 
-    Each chunk's ``path`` is the segment .mp4 file in ``out_dir`` (so the
-    caller-provided tempdir must outlive the embedding call).
-    ``preview_b64`` is a thumbnail derived from that scene's keyframe
-    PNG via :func:`media.make_image_thumbnail`.
+    Each scene yields a ``video_scene`` chunk (whose ``path`` is the
+    segment .mp4 file in ``out_dir`` — the caller-provided tempdir
+    must outlive the embedding call). When the ASR backend produces
+    a non-empty transcript for that segment, an additional
+    ``video_transcript`` chunk is emitted with ``content=transcript``
+    and ``path=None`` — the store embeds the transcript string as
+    text rather than passing a file to the multimodal backend.
 
     Args:
         path: Absolute path to the source video.
         out_dir: Directory (typically a TemporaryDirectory) to hold
             segment .mp4 files and keyframe PNGs. MUST outlive the
             embedding call.
-        caption: Optional caption; used verbatim as ``content`` if given.
-            Otherwise ``content`` is ``f"scene {i} @ {t:.1f}s"``.
+        caption: Optional caption; used verbatim as ``content`` for
+            scenes where ASR returned no text. When ASR produced a
+            transcript, it takes precedence.
     """
     if not path.is_file():
         raise FileNotFoundError(f"chunk_video: not a file: {path}")
@@ -104,6 +117,7 @@ def chunk_video(
 
     chunks: list[MediaChunk] = []
     resolved_src = str(path.resolve())
+    asr_lang = os.environ.get("ASR_LANGUAGE", "").strip() or None
 
     for i, (t_start, t_end) in enumerate(bounds):
         seg_path = out_dir / f"scene_{i:04d}{path.suffix.lower()}"
@@ -127,8 +141,18 @@ def chunk_video(
                     i, kf, e,
                 )
 
-        content = (caption.strip() if caption and caption.strip()
-                   else f"scene {i} @ {t_start:.1f}s")
+        # Transcribe the segment BEFORE deciding what content to use.
+        # asr.transcribe never raises — empty string signals disabled
+        # or silent, in which case we fall back to caption/placeholder.
+        transcript = await asr.transcribe(seg_path, language=asr_lang)
+        transcript = transcript.strip()
+
+        if transcript:
+            content = transcript
+        elif caption and caption.strip():
+            content = caption.strip()
+        else:
+            content = f"scene {i} @ {t_start:.1f}s"
 
         meta = {
             "sha256_src": src_sha,
@@ -138,6 +162,8 @@ def chunk_video(
             "codec": codec,
             "scene_idx": i,
         }
+        if transcript:
+            meta["has_transcript"] = True
 
         chunks.append(MediaChunk(
             kind="video_scene",
@@ -149,30 +175,70 @@ def chunk_video(
             path=seg_path,
         ))
 
+        # Paired text-embedded row — only when ASR actually produced
+        # text. It shares source_path + media_ref + thumbnail with the
+        # video row so the reconciler's cascade-delete removes both
+        # together on file update/deletion, and the viewer anchors
+        # both dots to the same scene.
+        if transcript:
+            chunks.append(MediaChunk(
+                kind="video_transcript",
+                content=transcript,
+                media_ref=f"{resolved_src}#t={t_start:.2f}",
+                media_type="text/plain",
+                preview_b64=thumb,
+                metadata={
+                    **meta,
+                    "transcript_source": asr.get_backend().name,
+                },
+                path=None,
+            ))
+
     if not chunks:
         # Pathological: produce a single whole-file fallback segment.
         t_end = min(duration or ffmpeg_utils.VIDEO_SEGMENT_MAX_S,
                     ffmpeg_utils.VIDEO_SEGMENT_MAX_S)
         seg_path = out_dir / f"scene_0000{path.suffix.lower()}"
         ffmpeg_utils.extract_video_segment(path, 0.0, t_end, seg_path)
-        content = (caption.strip() if caption and caption.strip()
-                   else "scene 0 @ 0.0s")
+        fallback_transcript = (await asr.transcribe(seg_path, language=asr_lang)).strip()
+        if fallback_transcript:
+            content = fallback_transcript
+        elif caption and caption.strip():
+            content = caption.strip()
+        else:
+            content = "scene 0 @ 0.0s"
+        fallback_meta = {
+            "sha256_src": src_sha,
+            "t_start_s": 0.0,
+            "t_end_s": round(t_end, 3),
+            "duration_s": round(t_end, 3),
+            "codec": codec,
+            "scene_idx": 0,
+        }
+        if fallback_transcript:
+            fallback_meta["has_transcript"] = True
         chunks.append(MediaChunk(
             kind="video_scene",
             content=content,
             media_ref=f"{resolved_src}#t=0.00",
             media_type=mime,
             preview_b64=None,
-            metadata={
-                "sha256_src": src_sha,
-                "t_start_s": 0.0,
-                "t_end_s": round(t_end, 3),
-                "duration_s": round(t_end, 3),
-                "codec": codec,
-                "scene_idx": 0,
-            },
+            metadata=fallback_meta,
             path=seg_path,
         ))
+        if fallback_transcript:
+            chunks.append(MediaChunk(
+                kind="video_transcript",
+                content=fallback_transcript,
+                media_ref=f"{resolved_src}#t=0.00",
+                media_type="text/plain",
+                preview_b64=None,
+                metadata={
+                    **fallback_meta,
+                    "transcript_source": asr.get_backend().name,
+                },
+                path=None,
+            ))
 
     logger.debug(
         "chunk_video: %s -> %d scene(s) duration=%.2fs codec=%s",

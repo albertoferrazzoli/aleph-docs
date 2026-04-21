@@ -1,21 +1,26 @@
-"""Audio → one MediaChunk per ≤80 s overlapping segment.
+"""Audio → paired MediaChunks per ≤80 s overlapping segment.
 
-No embedding happens here; that is deferred to
-``store.upsert_media_chunk``. The chunker splits the file via ffmpeg
-into overlapping windows and hands each segment file to the caller
-embedded in a :class:`MediaChunk` (with ``path`` pointing at it).
+Per segment we emit:
+  - one ``audio_clip`` chunk whose embedding is the multimodal audio
+    vector (requires a backend with audio modality, e.g.
+    gemini-2-preview)
+  - optionally, one ``audio_transcript`` chunk whose ``content`` is
+    the Whisper transcript — text-embedded, so works with every
+    backend including `local` (Ollama).
 
-Note: segment files live in ``out_dir`` which MUST outlive the
-embedding call — the backend reads them during ``.embed([path])``.
+When ASR is disabled or the segment is silent, only the audio_clip
+row is emitted with a placeholder content — so ingest never fails
+because of ASR.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 from pathlib import Path
 from typing import List
 
-from . import ffmpeg_utils, media
+from . import asr, ffmpeg_utils, media
 from .types import MediaChunk
 
 logger = logging.getLogger("memory")
@@ -44,20 +49,22 @@ def _slice_transcript(transcript: str, n: int, i: int) -> str:
     return transcript[start:end].strip()
 
 
-def chunk_audio(
+async def chunk_audio(
     path: Path,
     out_dir: Path,
     transcript: str | None = None,
 ) -> List[MediaChunk]:
-    """Window audio into ≤80 s segments (2 s overlap).
+    """Window audio into ≤80 s segments and optionally ASR-transcribe each.
 
     Args:
         path: Absolute path to the source audio file (mp3 or wav).
         out_dir: Directory (typically a TemporaryDirectory) to hold
             per-segment WAV files. MUST outlive the embedding call.
-        transcript: Optional full-file transcript. If provided, per
-            segment ``content`` gets a proportional slice; else
-            ``content`` is ``f"clip {i} @ {t_start:.1f}s"``.
+        transcript: Optional caller-provided full-file transcript.
+            When set and the active ASR backend is disabled, it is
+            sliced (character-proportional) across segments. When
+            ASR is active, per-segment Whisper output takes
+            precedence over this argument.
     """
     if not path.is_file():
         raise FileNotFoundError(f"chunk_audio: not a file: {path}")
@@ -80,11 +87,23 @@ def chunk_audio(
     segments = ffmpeg_utils.segment_audio(path, out_dir=out_dir)
     n = len(segments)
     resolved_src = str(path.resolve())
+    asr_lang = os.environ.get("ASR_LANGUAGE", "").strip() or None
 
     chunks: list[MediaChunk] = []
     for i, (t_start, t_end, seg_path) in enumerate(segments):
-        if transcript:
-            content = _slice_transcript(transcript, n, i) or f"clip {i} @ {t_start:.1f}s"
+        # Per-segment Whisper (if active). Swallows all errors → "".
+        seg_transcript = (
+            await asr.transcribe(seg_path, language=asr_lang)
+        ).strip()
+
+        # Pick content: Whisper > caller-provided sliced transcript > placeholder.
+        if seg_transcript:
+            content = seg_transcript
+        elif transcript:
+            content = (
+                _slice_transcript(transcript, n, i)
+                or f"clip {i} @ {t_start:.1f}s"
+            )
         else:
             content = f"clip {i} @ {t_start:.1f}s"
 
@@ -95,6 +114,8 @@ def chunk_audio(
             "duration_s": round(t_end - t_start, 3),
             "codec": codec,
         }
+        if seg_transcript:
+            meta["has_transcript"] = True
 
         chunks.append(MediaChunk(
             kind="audio_clip",
@@ -105,6 +126,20 @@ def chunk_audio(
             metadata=meta,
             path=seg_path,
         ))
+
+        if seg_transcript:
+            chunks.append(MediaChunk(
+                kind="audio_transcript",
+                content=seg_transcript,
+                media_ref=f"{resolved_src}#t={t_start:.2f},{t_end:.2f}",
+                media_type="text/plain",
+                preview_b64=None,
+                metadata={
+                    **meta,
+                    "transcript_source": asr.get_backend().name,
+                },
+                path=None,
+            ))
 
     logger.debug(
         "chunk_audio: %s -> %d clip(s) duration=%.2fs codec=%s",

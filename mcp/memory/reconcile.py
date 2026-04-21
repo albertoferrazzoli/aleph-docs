@@ -139,9 +139,10 @@ async def _upsert_file(
 
     Returns a summary dict {kind: count} for telemetry.
     """
-    chunks = await asyncio.to_thread(
-        route_media, abs_path, caption=None
-    )
+    # `route_media` is async now — video/audio chunkers may call ASR
+    # (which is network-bound). For image/pdf the coroutine returns
+    # almost immediately after the synchronous chunker call.
+    chunks = await route_media(abs_path, caption=None)
     by_kind: dict[str, int] = {}
     src_str = str(abs_path.resolve())
     for c in chunks:

@@ -391,6 +391,22 @@ the links are in the last column.
 | `gemini-2-preview` | **Video** | per frame @ 1 fps | **$0.00079** | same |
 | `local` (Ollama + BGE-M3) | Any (uses local compute) | **$0** recurring | electricity only | [Ollama models](https://ollama.com/library) |
 
+**ASR (speech-to-text)** is a separate cost dimension: when `ASR_ENABLED=true`
+the video/audio chunkers call the selected `ASR_BACKEND` for each
+scene/clip to produce a transcript, then embed that transcript as text
+(trivial cost on top of the embedder). The ASR cost itself depends on
+the backend:
+
+| `ASR_BACKEND` | Cost per minute | Key needed | Notes |
+|---|---|---|---|
+| `whisper_local` (default) | **$0** | none | Runs whisper.cpp on your host (5-10× realtime on Apple Silicon Metal) or falls back to `faster-whisper` inside the mcp container (CPU-bound, ~0.5× realtime — slow for bulk ingest). See "Running Whisper locally" below. |
+| `openai` | **~$0.006** | `OPENAI_API_KEY` | OpenAI's `whisper-1` — 30 h of course ≈ **~$11**. Cheapest cloud path. |
+| `gemini` | **~$0.01** | `GOOGLE_API_KEY` | `gemini-2.5-flash` with audio input — 30 h of course ≈ **~$18**. Reuses the same key as the embedder. |
+
+Per-scene the total spend is **embedder cost + ASR cost** (both
+computed once at ingest, not per query). Query cost stays trivial
+(one small text embed per search).
+
 ### Ballpark cost per corpus size
 
 These are **order-of-magnitude** estimates, not quotes. Real cost
@@ -540,6 +556,83 @@ a few seconds per chunk on a modern laptop.
   version-pinned.
 
 See [`.env.example`](.env.example) for the full list of `OLLAMA_*` knobs.
+
+---
+
+## Running Whisper locally for free transcripts
+
+When `ASR_BACKEND=whisper_local` (the default), the aleph MCP
+transcribes every video scene and audio clip locally via
+[`whisper.cpp`](https://github.com/ggerganov/whisper.cpp) — no API
+keys, no per-minute bill. Two configurations, picked automatically
+based on whether `ASR_HOST` is set:
+
+### Host HTTP bridge (recommended — fast path)
+
+Run whisper.cpp as an HTTP server on your host so the mcp container
+can reach it over `host.docker.internal`. On Apple Silicon this
+uses Metal acceleration: large-v3 runs at **5-10× realtime**, so a
+30 h course is transcribed in 3-6 h wall time with the CPU free for
+your other work.
+
+```bash
+# 1. Build whisper.cpp with Metal (macOS) or BLAS (Linux)
+git clone https://github.com/ggerganov/whisper.cpp
+cd whisper.cpp
+make -j                                   # enables Metal on Apple Silicon
+bash ./models/download-ggml-model.sh large-v3
+
+# 2. Start the HTTP server
+./build/bin/whisper-server \
+    -m models/ggml-large-v3.bin \
+    --host 0.0.0.0 --port 8090 \
+    --convert
+
+# 3. Test it
+curl -F file=@any-short-audio.wav http://localhost:8090/inference
+# Expected: {"text":"..."}
+```
+
+Then in `.env`:
+
+```bash
+ASR_BACKEND=whisper_local          # default; kept for clarity
+ASR_HOST=http://host.docker.internal:8090   # macOS / Windows
+# ASR_HOST=http://172.17.0.1:8090            # Linux (default docker0)
+ASR_LANGUAGE=                       # auto-detect; set 'it'/'en' for speed
+ASR_MODEL=large-v3                  # informational — the server owns the model
+```
+
+Restart the mcp container (`docker compose up -d`). New video/audio
+files ingested from that point onward include transcripts. Existing
+rows are untouched until their source file's SHA-256 changes (by
+design — transcription is the slow part of ingest and you don't
+want it to run on every restart).
+
+### In-container fallback (slow, automatic)
+
+When `ASR_HOST` is unset (or unreachable), the mcp container
+transparently falls back to `faster-whisper` on CPU. First call
+downloads the model (~3 GB for large-v3, cached in the `mcp_data`
+volume). Speed is ~0.5× realtime — acceptable for a handful of
+short files, prohibitively slow for a large course.
+
+Override the default model if disk/RAM is tight:
+
+```bash
+ASR_MODEL=medium    # ~1.5 GB, ~2× realtime on CPU
+ASR_MODEL=small     # ~500 MB, ~3× realtime on CPU, lower accuracy
+```
+
+A one-time warning is logged when the fallback kicks in, so you
+know you're not on the fast path.
+
+### Disabling ASR
+
+Set `ASR_ENABLED=false`. The chunker then emits the legacy
+`"scene N @ Xs"` placeholder content on `video_scene` rows and
+produces no `video_transcript` rows — identical to the
+pre-transcription behaviour.
 
 ---
 

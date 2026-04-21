@@ -45,6 +45,13 @@ ALTER TYPE memory_kind ADD VALUE IF NOT EXISTS 'image';
 ALTER TYPE memory_kind ADD VALUE IF NOT EXISTS 'video_scene';
 ALTER TYPE memory_kind ADD VALUE IF NOT EXISTS 'audio_clip';
 ALTER TYPE memory_kind ADD VALUE IF NOT EXISTS 'pdf_page';
+-- Paired-text kinds: one row per scene/clip holding the Whisper
+-- transcript as content with a TEXT embedding of that transcript.
+-- Share source_path + media_ref with the visual/audio row so the
+-- reconciler's cascade delete and the viewer's navigation both
+-- continue to work unchanged.
+ALTER TYPE memory_kind ADD VALUE IF NOT EXISTS 'video_transcript';
+ALTER TYPE memory_kind ADD VALUE IF NOT EXISTS 'audio_transcript';
 
 CREATE UNIQUE INDEX IF NOT EXISTS memories_doc_chunk_uniq
     ON memories(source_path, source_section)
