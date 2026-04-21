@@ -96,7 +96,7 @@ a few cents a year to maintain, and never loses the audit trail.
 | **Audit trail** | At best, vector-DB row history | `git blame` on `.md` files | Both: `memory_audit` table + git log of canonical repo |
 | **Serendipity** (find unexpected connections) | Weak — similarity lost in prompt | Limited to explicit wikilinks | UMAP 3D projection surfaces latent clusters |
 | **Visualization** | None (vectors aren't human-readable) | Obsidian 2D graph (explicit links only) | Real-time 3D viewer with decay, live writes, audit history |
-| **Loop back to canonical docs** | None | Manual rewriting | `propose_doc_patch(open_pr=true)` opens a PR automatically |
+| **Loop back to canonical docs** | None | Manual rewriting | `find_doc_gaps` → `suggest_doc_update` → LLM writes prose → `propose_doc_patch` opens a PR. Guardrails refuse the PR when the target page or the supporting insights are too weak, and propose creating a new page when no existing one fits. |
 | **Modalities supported** | Usually text only | Text only | Text + image + video + audio + PDF (one unified vector space) |
 | **Offline / local** | Easy (any local vector DB) | Easy (any local LLM + files) | Yes — `EMBED_BACKEND=local` runs fully offline via Ollama |
 | **Predictable cost** | Low and flat | Grows with knowledge base size | Capped: SQL-free for most work, LLM budget hard-limited |
@@ -142,12 +142,15 @@ a few cents a year to maintain, and never loses the audit trail.
 | **Multimodal corpora** | Markdown / images / video / audio / PDF indexed side by side into one pgvector space |
 | **Pluggable embedders** | `gemini-001` / `gemini-2-preview` / `local` (Ollama) selectable via `EMBED_BACKEND` env |
 | Lexical search over docs | SQLite FTS5, hourly re-indexed from a GitHub repo or a local `./docs/` folder |
-| Semantic search (docs + insights + interactions, across modalities) | pgvector HNSW with cosine + Ebbinghaus decay |
+| Semantic search (docs + insights + interactions, across modalities) | pgvector HNSW with cosine + Ebbinghaus decay (canonical kinds — docs, images, pdf pages, video scenes, audio clips — are exempt from decay and never fall off) |
 | Auto-reinforcement | Every hit bumps `stability × 1.7`, `access_count += 1` |
 | Manual knowledge capture | `remember(content, context)` for text, `remember_media(path)` for files |
 | Manual pruning | `forget(memory_id)` with audit snapshot preserved |
 | Audit trail | `memory_audit` table + `audit_history` MCP tool |
-| Doc-patch proposals | `suggest_doc_update`, `propose_doc_patch(open_pr=true)` opens PRs on the docs repo |
+| Exact memory counts | `memory_stats()` returns per-kind counts (semantic_search is capped at 50 rows so LLM clients can't otherwise know the totals) |
+| Gap detection | `find_doc_gaps(max_top_sim, limit)` — surfaces interactions whose best doc_chunk match is weak; each row is a PR seed |
+| Doc-patch flow | Three-step: `suggest_doc_update(topic)` → the LLM reads the target section and composes prose → `propose_doc_patch(topic, prose, ...)` commits on a branch. Two guardrails built-in: `fallback_proposal` suggests creating a new page when no existing target is close enough; `abort_recommendation` refuses the PR when supporting insights are only loosely related. |
+| New-page mode | `propose_doc_patch(create_new_file=True, new_path, new_title, prose)` writes a brand-new markdown file when the fallback is accepted |
 | Quality linting | `lint_run` with 4 checks (orphan, redundant, stale, contradiction) + cost-capped LLM judge |
 | Live 3D viewer | UMAP + HDBSCAN projection, SSE patches, right-panel with audit history, per-modality renderers (image / video / audio / PDF) |
 | Docker-native | `docker compose up` — Postgres + MCP + viewer in one command |
@@ -206,8 +209,9 @@ aleph-docs/
 │   │   ├── content.py        # get_page, get_page_section, get_code_blocks
 │   │   ├── meta.py           # get_doc_stats, get_changelog
 │   │   └── memory.py         # semantic_search, remember, remember_media, recall,
-│   │                         # forget, audit_history, suggest_doc_update,
-│   │                         # propose_doc_patch, lint_run, lint_findings, lint_resolve
+│   │                         # forget, audit_history, memory_stats, find_doc_gaps,
+│   │                         # suggest_doc_update, propose_doc_patch,
+│   │                         # lint_run, lint_findings, lint_resolve
 │   ├── systemd/              # service + timer units (templates)
 │   ├── tests/                # pytest (pytest-postgresql)
 │   └── deploy-mcp.sh         # idempotent production deploy script
