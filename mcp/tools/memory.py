@@ -12,10 +12,7 @@ from fastmcp.utilities.types import Image
 from helpers import error_response
 from memory import db, store
 from memory import media as _media
-from memory.chunker_audio import chunk_audio as _chunk_audio
-from memory.chunker_image import chunk_image as _chunk_image
-from memory.chunker_pdf import chunk_pdf as _chunk_pdf
-from memory.chunker_video import chunk_video as _chunk_video
+from memory.media_router import MEDIA_ROUTES as _MEDIA_ROUTES, route_media as _route_media
 from memory.types import MediaChunk
 
 log = logging.getLogger("memory")
@@ -37,70 +34,6 @@ def _title_from_topic(text: str) -> str:
     trims whitespace and drops trailing punctuation."""
     t = text.strip().rstrip(".!?,;:")
     return t or "Untitled"
-
-
-# Extension → (modality label, lazy chunker). Only images are wired in
-# Wave 2A; video/audio/pdf raise NotImplementedError with a pointer to
-# the wave that enables them. Agents B/C replace those branches with
-# real chunkers without touching the surrounding tool.
-_MEDIA_ROUTES: dict[str, str] = {
-    ".png": "image",
-    ".jpg": "image",
-    ".jpeg": "image",
-    ".webp": "image",
-    ".mp4": "video",
-    ".mov": "video",
-    ".mp3": "audio",
-    ".wav": "audio",
-    ".pdf": "pdf",
-}
-
-
-def _route_media(path: Path, *, caption: str | None = None) -> list[MediaChunk]:
-    """Dispatch a media file to its chunker based on extension.
-
-    Returns a list of MediaChunks — images and PDFs naturally produce 1
-    or more, videos/audio may produce many segments. The caller
-    (`remember_media`) iterates and upserts each chunk.
-    """
-    suffix = path.suffix.lower()
-    modality = _MEDIA_ROUTES.get(suffix)
-    if modality is None:
-        raise ValueError(
-            f"extension {suffix!r} is not a recognised media type. "
-            f"Allowed: {sorted(_MEDIA_ROUTES.keys())}"
-        )
-    if modality == "image":
-        return [_chunk_image(path, caption=caption)]
-    if modality == "video":
-        # Segment files must outlive every `store.upsert_media_chunk` call
-        # (the backend reads them during the embed step). `mkdtemp` returns
-        # a directory that survives the function; the OS /tmp reaper
-        # eventually cleans it. We stash the path in metadata so callers
-        # can optionally remove it after all upserts complete.
-        import tempfile as _tempfile
-        tmpdir = _tempfile.mkdtemp(prefix="aleph-video-")
-        chunks = _chunk_video(path, out_dir=Path(tmpdir), caption=caption)
-        if not chunks:
-            raise RuntimeError(f"chunk_video returned no scenes for {path}")
-        for c in chunks:
-            c.metadata.setdefault("_tmpdir", tmpdir)
-        return chunks
-    if modality == "audio":
-        import tempfile as _tempfile
-        tmpdir = _tempfile.mkdtemp(prefix="aleph-audio-")
-        chunks = _chunk_audio(path, out_dir=Path(tmpdir), transcript=caption)
-        if not chunks:
-            raise RuntimeError(f"chunk_audio returned no clips for {path}")
-        for c in chunks:
-            c.metadata.setdefault("_tmpdir", tmpdir)
-        return chunks
-    if modality == "pdf":
-        chunks = _chunk_pdf(path)
-        if not chunks:
-            raise RuntimeError(f"chunk_pdf returned no pages for {path}")
-        return chunks
-    raise ValueError(f"unhandled modality: {modality}")
 
 
 def register(mcp):
@@ -418,6 +351,35 @@ def register(mcp):
             return {"error": f"invalid media: {e}"}
         except RuntimeError as e:
             return {"error": str(e)}
+        except db.MemoryDisabled:
+            return {"error": "semantic memory is disabled"}
+        except Exception as e:
+            return error_response(e)
+
+    @mcp.tool()
+    async def reindex_docs() -> dict:
+        """Force a media reconcile over the docs corpus (add/update/delete).
+
+        Works in both DOCS_MODE=git (uses `git diff` since
+        last_media_commit_hash) and DOCS_MODE=local (walks the bind-
+        mounted docs/ and diffs against the memories table by
+        source_path + content hash).
+
+        Use when:
+          - you added/removed files without restarting the container;
+          - a previous run aborted mid-way (errors surfaced in /health);
+          - you want to force a re-scan to confirm DB/fs are in sync.
+
+        Returns the ReconcileSummary dict (added/updated/removed/skipped,
+        per-kind chunk counts, errors). Runs are serialised — calling
+        this while a run is in flight will wait for the current run to
+        finish before starting another.
+        """
+        try:
+            from memory.ingest_task import get_ingest_task
+            it = get_ingest_task()
+            summary = await it.run_once()
+            return summary.as_dict()
         except db.MemoryDisabled:
             return {"error": "semantic memory is disabled"}
         except Exception as e:

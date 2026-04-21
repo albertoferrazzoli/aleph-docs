@@ -59,6 +59,7 @@ for module in [search, navigation, content, lookup, meta, memory_tools]:
 
 
 if __name__ == "__main__":
+    import asyncio
     from contextlib import asynccontextmanager
 
     import uvicorn
@@ -100,6 +101,15 @@ if __name__ == "__main__":
             payload["memory_enabled"] = False
             payload["memory_count"] = None
             payload["memory_error"] = str(e)
+
+        # Ingest task progress (media reconciler). Always present so
+        # operators can tell the difference between "no task ever ran"
+        # and "ran and finished".
+        try:
+            from memory.ingest_task import get_ingest_task
+            payload["ingest"] = get_ingest_task().snapshot()
+        except Exception as e:
+            payload["ingest"] = {"state": "unavailable", "error": str(e)}
         return JSONResponse(payload)
 
     streamable_app = mcp.http_app(transport="streamable-http", path="/mcp")
@@ -111,11 +121,67 @@ if __name__ == "__main__":
             await memory_db.init_pool()
         except Exception as e:
             print(f"[memory] pool init failed (continuing without memory): {e}")
+
+        # Media reconciler: background task + (optional) filesystem watcher.
+        # In DOCS_MODE=git the initial run happens here (piggybacks on the
+        # pull done above), the watcher is skipped.
+        ingest_bg_task = None
+        watcher = None
+        try:
+            import indexer as _indexer
+            from memory.ingest_task import get_ingest_task
+            from memory.watcher import start_if_local
+            ingest_on_boot = os.environ.get(
+                "INGEST_MEDIA_ON_BOOT", "true"
+            ).lower() == "true"
+            it = get_ingest_task()
+
+            async def _bg():
+                try:
+                    summary = await it.run_once()
+                    print(
+                        f"[ingest] initial media reconcile done: "
+                        f"+{summary.added} ~{summary.updated} "
+                        f"-{summary.removed} skip={summary.skipped} "
+                        f"errors={len(summary.errors)} "
+                        f"in {round(summary.finished_at - summary.started_at, 1)}s"
+                    )
+                except Exception as e:
+                    print(f"[ingest] initial reconcile failed: {e}")
+
+            if ingest_on_boot:
+                ingest_bg_task = asyncio.create_task(_bg())
+            else:
+                print("[ingest] INGEST_MEDIA_ON_BOOT=false — skipping boot scan")
+
+            loop = asyncio.get_running_loop()
+            watcher = start_if_local(
+                _indexer.REPO_PATH
+                if _indexer.DOCS_MODE == "local"
+                else (_indexer.REPO_PATH / _indexer.CONTENT_SUBDIR
+                      if _indexer.CONTENT_SUBDIR
+                      else _indexer.REPO_PATH),
+                it, loop,
+            )
+        except Exception as e:
+            print(f"[ingest] setup failed (continuing without reconciler): {e}")
+
         try:
             async with streamable_app.lifespan(streamable_app):
                 async with sse_app.lifespan(sse_app):
                     yield {}
         finally:
+            if watcher is not None:
+                try:
+                    watcher.stop()
+                except Exception as e:
+                    print(f"[watcher] stop warning: {e}")
+            if ingest_bg_task is not None:
+                try:
+                    if not ingest_bg_task.done():
+                        ingest_bg_task.cancel()
+                except Exception:
+                    pass
             try:
                 await memory_db.close_pool()
             except Exception as e:

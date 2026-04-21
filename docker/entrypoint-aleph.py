@@ -40,6 +40,129 @@ PORT = int(os.environ.get("ALEPH_PORT", "8765"))
 
 
 from contextlib import asynccontextmanager
+import asyncio
+
+
+async def _auto_projection_task():
+    """Listen for `memory_change` NOTIFY and rebuild the graph snapshot.
+
+    Two coalescing policies fire in whichever triggers first:
+
+    - **Quiet debounce** (`PROJECTION_DEBOUNCE_S`, default 30 s): rebuild
+      after that many seconds with no further `memory_change` NOTIFY.
+      Ideal for small bursts that settle quickly.
+
+    - **Max staleness** (`PROJECTION_MAX_STALE_S`, default 120 s): rebuild
+      at least this often while there are pending changes, even mid-burst.
+      Without this, a multi-minute ingest would never refresh the viewer.
+
+    Also fires a coalesced `graph_rebuilt` pg_notify so connected SSE
+    clients reload immediately — matches the existing contract in
+    aleph/backend/main.py:186.
+    """
+    import os as _os
+    import time as _time
+    import psycopg
+    from backend import db as aleph_db
+    from backend.projection import build_snapshot
+
+    debounce_s = float(_os.environ.get("PROJECTION_DEBOUNCE_S", "30"))
+    max_stale_s = float(_os.environ.get("PROJECTION_MAX_STALE_S", "120"))
+
+    dsn = aleph_db.raw_dsn()
+    if not dsn:
+        print("[auto-projection] PG_DSN not set — auto-rebuild disabled", flush=True)
+        return
+
+    # One persistent psycopg connection for LISTEN (not via the pool —
+    # LISTEN requires a dedicated connection held for the lifetime).
+    try:
+        aconn = await psycopg.AsyncConnection.connect(dsn, autocommit=True)
+    except Exception as e:
+        print(f"[auto-projection] connect failed: {e}", flush=True)
+        return
+
+    try:
+        async with aconn.cursor() as cur:
+            await cur.execute("LISTEN memory_change")
+        print(
+            f"[auto-projection] listening on memory_change (debounce={debounce_s}s)",
+            flush=True,
+        )
+
+        notify_gen = aconn.notifies()
+        pending_change = False
+        first_pending_at: float | None = None
+
+        async def _do_rebuild():
+            try:
+                payload = await build_snapshot()
+                stats = payload.get("stats") or {}
+                n_nodes = int(stats.get("n_nodes") or 0)
+                if n_nodes == 0:
+                    log.info("[auto-projection] skipping insert — 0 nodes")
+                    return
+                version = await aleph_db.insert_snapshot(payload)
+                # Let connected SSE clients know a new snapshot is ready.
+                async with aconn.cursor() as cur2:
+                    await cur2.execute(
+                        "SELECT pg_notify('graph_rebuilt', %s)",
+                        (str(version),),
+                    )
+                print(
+                    f"[auto-projection] snapshot v{version} built "
+                    f"nodes={n_nodes} edges={int(stats.get('n_edges') or 0)}",
+                    flush=True,
+                )
+            except Exception as e:
+                log.exception("[auto-projection] rebuild failed: %s", e)
+
+        # Loop: drain notifies, choose the smaller of (quiet-debounce,
+        # time-until-max-staleness) as the next wait interval.
+        while True:
+            try:
+                if pending_change and first_pending_at is not None:
+                    staleness = _time.monotonic() - first_pending_at
+                    # Time until we MUST rebuild even if notifies keep arriving.
+                    stale_budget = max(0.0, max_stale_s - staleness)
+                    timeout = min(debounce_s, stale_budget)
+                else:
+                    timeout = None  # block indefinitely for the first notify
+
+                fut = asyncio.create_task(notify_gen.__anext__())
+                done, _ = await asyncio.wait({fut}, timeout=timeout)
+                if fut in done:
+                    try:
+                        _n = fut.result()
+                    except StopAsyncIteration:
+                        break
+                    if not pending_change:
+                        first_pending_at = _time.monotonic()
+                    pending_change = True
+                    # Did we just cross the staleness ceiling mid-burst?
+                    if first_pending_at is not None and (
+                        _time.monotonic() - first_pending_at >= max_stale_s
+                    ):
+                        pending_change = False
+                        first_pending_at = None
+                        await _do_rebuild()
+                else:
+                    # Timed out → either debounce settled or staleness hit.
+                    fut.cancel()
+                    if pending_change:
+                        pending_change = False
+                        first_pending_at = None
+                        await _do_rebuild()
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                print(f"[auto-projection] loop error: {e}", flush=True)
+                await asyncio.sleep(5)
+    finally:
+        try:
+            await aconn.close()
+        except Exception:
+            pass
 
 
 @asynccontextmanager
@@ -49,7 +172,22 @@ async def root_lifespan(_app):
     except Exception as e:
         import logging
         logging.getLogger("aleph").warning("[aleph] pool init failed: %s", e)
+
+    # Background auto-projection task — rebuilds the UMAP snapshot after
+    # ingest bursts settle. Optional: set AUTO_PROJECTION=false to disable.
+    import os as _os
+    auto_proj_task = None
+    if _os.environ.get("AUTO_PROJECTION", "true").lower() == "true":
+        auto_proj_task = asyncio.create_task(_auto_projection_task())
+
     yield
+
+    if auto_proj_task is not None and not auto_proj_task.done():
+        auto_proj_task.cancel()
+        try:
+            await auto_proj_task
+        except (asyncio.CancelledError, Exception):
+            pass
     try:
         await memory_db.close_pool()
     except Exception:

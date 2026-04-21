@@ -141,7 +141,7 @@ a few cents a year to maintain, and never loses the audit trail.
 |---|---|
 | **Multimodal corpora** | Markdown / images / video / audio / PDF indexed side by side into one pgvector space |
 | **Pluggable embedders** | `gemini-001` / `gemini-2-preview` / `local` (Ollama) selectable via `EMBED_BACKEND` env |
-| Lexical search over docs | SQLite FTS5, hourly re-indexed from a GitHub repo or a local `./docs/` folder |
+| Lexical search over docs | SQLite FTS5, kept in sync incrementally — `git diff` in git mode, `watchdog` + SHA-256 diff in local mode |
 | Semantic search (docs + insights + interactions, across modalities) | pgvector HNSW with cosine + Ebbinghaus decay (canonical kinds — docs, images, pdf pages, video scenes, audio clips — are exempt from decay and never fall off) |
 | Auto-reinforcement | Every hit bumps `stability × 1.7`, `access_count += 1` |
 | Manual knowledge capture | `remember(content, context)` for text, `remember_media(path)` for files |
@@ -240,20 +240,101 @@ aleph-docs/
 
 ## Where do your docs live?
 
-Aleph Docs supports two modes — switch between them just by setting (or
-leaving empty) the `DOCS_REPO_URL` env var:
+Aleph Docs supports **two mutually exclusive change-detection modes**.
+The active mode is derived from whether `DOCS_REPO_URL` is set — no
+separate flag, no runtime toggle. Pick the one that matches how your
+team authors docs.
 
-| Mode | When to use | Source of docs |
-|---|---|---|
-| **Local** (default) | Solo devs, small teams, "just works" out of the box | The `./docs/` folder of this repo (commit your markdown alongside the app) |
-| **Remote git repo** | Larger teams, docs have their own review cycle | Any GitHub repo — the indexer clones + pulls with a PAT |
+| Mode | Activated by | Change detection | Watcher |
+|---|---|---|---|
+| **Local (filesystem)** | `DOCS_REPO_URL` empty/absent (**default**) | Walk `docs/` at boot, diff by `source_path + SHA-256` against the `memories` table | Yes — `watchdog` with 2 s debounce (add/update/delete detected in real time) |
+| **Git repo** | `DOCS_REPO_URL` set | `git diff --name-status $last_media_commit_hash..HEAD` — authoritative per commit | No (the indexer-owned clone would race with pulls) |
 
-In both modes the hourly `indexer.py --update` job picks up changes
-incrementally; in remote mode it uses `git diff`, in local mode it uses
-file mtimes. No code changes, just env flipping.
+Both modes are **incremental and idempotent**. The reconciler computes
+SHA-256 of each file only when `mtime + size` changed, cascade-deletes
+chunks when a file is removed, and never re-embeds content that is
+already in the DB. The first boot runs the reconcile as a background
+task so the MCP server is reachable immediately — progress is exposed
+on `GET /health` under the `ingest` field.
 
-Drop a couple of `.md` files in `./docs/` and you can run the MCP without
-a remote repo at all. See [`docs/README.md`](docs/README.md).
+### Local (filesystem) mode — the default
+
+Works out of the box: drop anything into `./docs/` and the MCP picks
+it up. Supports markdown (`.md`, `.mdx`), images (`.png`, `.jpg`,
+`.jpeg`, `.webp`), videos (`.mp4`, `.mov`), audio (`.mp3`, `.wav`),
+and PDFs. Subfolders are free-form — there is no required layout.
+
+```bash
+# .env — the minimum for local mode
+DOCS_REPO_URL=                    # leave empty (default)
+EMBED_BACKEND=gemini-2-preview    # required for video/audio/pdf/image
+GOOGLE_API_KEY=<your key>
+INGEST_MEDIA_ON_BOOT=true         # default; set false to skip the boot scan
+```
+
+At runtime, the filesystem watcher is started automatically by the MCP
+server (`memory.watcher.start_if_local`). Drop a new MP4 into
+`./docs/videos/course-1/` and it appears as a coral-pink node in the
+viewer within a few seconds. Remove a PDF and its pages are deleted
+from the memory (cascade by `source_path`). No restart needed.
+
+To force an immediate re-scan (e.g. after a big `cp -r` or if the
+watcher missed events because the container was down), call the MCP
+tool `reindex_docs()` from your LLM client, or bounce the container
+with `docker compose restart mcp`.
+
+### Git mode
+
+Use when docs have their own review cycle and live in a separate
+repository. The indexer clones it into the `mcp_data` named volume
+and pulls `main` (or `DOCS_REPO_BRANCH`) on each MCP restart. Git
+itself is the source of truth for add / update / delete — no
+filesystem watcher, no hashing of the worktree.
+
+```bash
+# .env — git mode
+DOCS_REPO_URL=https://github.com/YOURORG/your-docs.git
+DOCS_REPO_BRANCH=main
+DOCS_REPO_TOKEN=ghp_xxx           # PAT with repo:read; only for private repos
+DOCS_REPO_PATH=repo               # where to clone inside the mcp container
+CONTENT_SUBDIR=content            # default; set to "" if markdown is in the repo root
+EMBED_BACKEND=gemini-2-preview
+GOOGLE_API_KEY=<your key>
+```
+
+When `DOCS_REPO_URL` is set, the local `./docs/` folder is ignored —
+push changes to the remote repo and the indexer picks them up on the
+next restart (or the next call to `reindex_docs()`). Because git diff
+is precise, git mode avoids false positives from editor save-rename
+cycles and partial writes that a filesystem watcher can briefly see.
+
+### Switching between modes
+
+Changing `DOCS_REPO_URL` after a successful ingest is a destructive
+operation: `source_path` values differ between the two modes
+(`/docs/foo.mp4` vs `/app/repo/content/foo.mp4`), so the new reconciler
+would import everything fresh while the old rows would linger as
+orphans. Do a clean switch:
+
+```bash
+docker compose down -v        # wipe both pgvector and the SQLite meta
+docker compose up -d --build  # ingest from scratch in the new mode
+```
+
+### Auto-rebuilding the 3D graph
+
+The viewer renders a UMAP snapshot (`graph_snapshot` table). A
+background task inside the `aleph` container listens for
+`memory_change` NOTIFY events and rebuilds the snapshot with a
+debounce policy: after 30 s of quiet (tunable via
+`PROJECTION_DEBOUNCE_S`), or every 120 s during a long ingest burst
+(tunable via `PROJECTION_MAX_STALE_S`), whichever fires first. Set
+`AUTO_PROJECTION=false` to disable and run `python -m backend.projection`
+inside the container manually.
+
+See [`docs/README.md`](docs/README.md) for a walkthrough of populating
+the local corpus, and [`ARCHITECTURE.md`](ARCHITECTURE.md) for the
+reconciler data flow.
 
 ---
 
@@ -506,7 +587,7 @@ lets development continue.
 
 ## Not included on purpose
 
-- **Your documentation content.** Point `DOCS_REPO_URL` at your own git repo; the indexer will clone, watch and embed it.
+- **Your documentation content.** Drop files under `./docs/` for local/filesystem mode, or point `DOCS_REPO_URL` at your own git repo for git mode — see the "Where do your docs live?" section above for both flows.
 - **Your secrets.** `.env.example` lists every variable; the real `.env` is gitignored.
 - **Product-specific tools.** The MCP's `find_*` helpers are generic examples; add your own under `mcp/tools/` for domain-specific shortcuts.
 - **A WordPress / CMS integration.** The original project this was extracted from had one; it's intentionally removed from the template. You can add a `tools/site.py` of your own if you want cross-source lookups.

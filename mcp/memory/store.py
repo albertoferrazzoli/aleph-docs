@@ -370,6 +370,9 @@ async def upsert_media_chunk(
     actor: str = "mcp:remember_media",
     context: str = "",
     tags: list[str] | None = None,
+    source_path: str | None = None,
+    source_sha256: str | None = None,
+    source_mtime: int | None = None,
 ) -> dict:
     """Embed + insert a single media memory row.
 
@@ -377,6 +380,13 @@ async def upsert_media_chunk(
     required by `chunk.kind` BEFORE spending any tokens. If not, raises
     RuntimeError with the active backend name — the tool layer surfaces
     this as a structured error so callers know to switch backends.
+
+    When `source_path` is provided, it is persisted in the `source_path`
+    column so the reconciler can diff filesystem state against DB state
+    and locate all chunks sharing the same input file. When omitted,
+    falls back to the base of `chunk.media_ref` (stripping any
+    `#page=`/`#t=` fragment). `source_sha256` / `source_mtime` go into
+    metadata for idempotency checks on re-ingest.
 
     Returns {"id": str, "kind": str, "media_type": str}.
     """
@@ -421,6 +431,17 @@ async def upsert_media_chunk(
         meta["context"] = context
     if tags:
         meta["tags"] = list(tags)
+    if source_sha256:
+        meta["source_sha256"] = source_sha256
+    if source_mtime is not None:
+        meta["source_mtime"] = int(source_mtime)
+
+    # Resolve the canonical `source_path` used for reconciliation. Prefer
+    # the explicit arg; fall back to the base of media_ref (strip fragment).
+    if source_path:
+        resolved_source_path = source_path
+    else:
+        resolved_source_path = (chunk.media_ref or "").split("#", 1)[0] or None
 
     async with db.get_conn() as conn:
         async with conn.cursor() as cur:
@@ -433,7 +454,7 @@ async def upsert_media_chunk(
                 (
                     chunk.kind,
                     chunk.content,
-                    chunk.media_ref,
+                    resolved_source_path,
                     json.dumps(meta),
                     _vec(emb),
                     stability,
@@ -466,6 +487,128 @@ async def upsert_media_chunk(
         "kind": chunk.kind,
         "media_type": chunk.media_type,
     }
+
+
+# ---------------------------------------------------------------------------
+# delete_by_source_path — cascade delete all chunks for one input file.
+#
+# Used by the media reconciler when a file is removed from docs/ or when
+# its hash has changed and all old chunks must be wiped before re-ingest.
+# Also covers the previously-orphaned .md delete case (one row per doc_chunk
+# sharing the same source_path).
+# ---------------------------------------------------------------------------
+
+async def delete_by_source_path(
+    source_path: str,
+    *,
+    actor: str = "indexer:reconcile",
+    kinds: list[str] | None = None,
+) -> list[dict]:
+    """Delete every memory whose source_path matches, snapshot to audit.
+
+    Args:
+        source_path: Exact value of the `source_path` column to match.
+        actor: Audit actor label.
+        kinds: Optional restriction to specific kinds (default: all).
+
+    Returns a list of {id, kind, content} dicts for the rows that were
+    deleted (so callers can log per-chunk what went away).
+    """
+    if not db.is_enabled():
+        return []
+    snapshots: list[tuple] = []
+    async with db.get_conn() as conn:
+        async with conn.cursor() as cur:
+            if kinds:
+                await cur.execute(
+                    "SELECT id, kind::text, content FROM memories "
+                    "WHERE source_path = %s AND kind::text = ANY(%s)",
+                    (source_path, list(kinds)),
+                )
+            else:
+                await cur.execute(
+                    "SELECT id, kind::text, content FROM memories "
+                    "WHERE source_path = %s",
+                    (source_path,),
+                )
+            snapshots = await cur.fetchall() or []
+            if not snapshots:
+                return []
+            ids = [row[0] for row in snapshots]
+            await cur.execute(
+                "DELETE FROM memories WHERE id = ANY(%s)",
+                (ids,),
+            )
+            await conn.commit()
+
+    out: list[dict] = []
+    for (mid, kind, content) in snapshots:
+        await audit.record(
+            "delete",
+            subject_id=str(mid),
+            actor=actor,
+            kind=kind,
+            content=content,
+            metadata={"source_path": source_path, "reason": "reconcile"},
+        )
+        out.append({"id": str(mid), "kind": kind, "content": content})
+    log.info(
+        "[memory] delete_by_source_path %s: removed %d row(s)",
+        source_path, len(out),
+    )
+    return out
+
+
+# ---------------------------------------------------------------------------
+# list_media_source_paths_with_hash — DB-side state for the reconciler diff.
+# ---------------------------------------------------------------------------
+
+_MEDIA_KINDS_SQL = ("image", "video_scene", "audio_clip", "pdf_page")
+
+
+async def list_media_source_paths_with_hash() -> dict[str, dict]:
+    """Return `{source_path: {sha256, mtime, kinds, count}}` over media rows.
+
+    The reconciler compares this map against the filesystem to decide
+    add/update/delete. `sha256` is taken from metadata['source_sha256']
+    of the first chunk for a given path (all chunks of the same file
+    share the same source sha). `kinds` is the distinct set of kinds
+    seen (useful for diagnostics).
+    """
+    if not db.is_enabled():
+        return {}
+    out: dict[str, dict] = {}
+    async with db.get_conn() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT source_path, "
+                "       (metadata->>'source_sha256') AS sha256, "
+                "       (metadata->>'source_mtime') AS mtime, "
+                "       kind::text, COUNT(*) AS n "
+                "FROM memories "
+                "WHERE source_path IS NOT NULL "
+                "  AND kind::text = ANY(%s) "
+                "GROUP BY source_path, "
+                "         (metadata->>'source_sha256'), "
+                "         (metadata->>'source_mtime'), kind::text",
+                (list(_MEDIA_KINDS_SQL),),
+            )
+            rows = await cur.fetchall() or []
+    for (sp, sha, mt, kind, n) in rows:
+        entry = out.setdefault(
+            sp, {"sha256": sha, "mtime": mt, "kinds": set(), "count": 0}
+        )
+        # If multiple rows disagree on sha256/mtime (e.g. a partially-migrated
+        # corpus) prefer the non-null one so downstream idempotency still works.
+        if not entry.get("sha256") and sha:
+            entry["sha256"] = sha
+        if not entry.get("mtime") and mt:
+            entry["mtime"] = mt
+        entry["kinds"].add(kind)
+        entry["count"] += int(n)
+    for v in out.values():
+        v["kinds"] = sorted(v["kinds"])
+    return out
 
 
 # ---------------------------------------------------------------------------
