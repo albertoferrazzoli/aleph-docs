@@ -447,6 +447,81 @@ def register(mcp):
             return error_response(e)
 
     @mcp.tool()
+    async def find_doc_gaps(max_top_sim: float = 0.5,
+                            limit: int = 10,
+                            min_access_count: int = 1) -> dict:
+        """List interactions whose best documentation match is weak — gap candidates.
+
+        An interaction represents a real question users asked. If its top
+        doc_chunk cosine similarity is low, the docs probably don't cover
+        the topic well. Those interactions are the natural seeds for a PR:
+        feed each `content` to `suggest_doc_update` as `topic` to decide
+        whether to propose an update.
+
+        Args:
+            max_top_sim: Gap threshold. Interactions whose top doc_chunk
+                similarity is <= this value are considered uncovered. Default 0.5.
+            limit: Max interactions returned (default 10).
+            min_access_count: Only consider interactions queried at least
+                this many times (default 1 = include every interaction).
+        """
+        try:
+            max_top_sim = max(0.0, min(float(max_top_sim), 1.0))
+            limit = max(1, min(int(limit), 50))
+            async with db.get_conn() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        """
+                        WITH interactions AS (
+                            SELECT id, content, access_count, created_at, embedding
+                            FROM memories
+                            WHERE kind = 'interaction'::memory_kind
+                              AND access_count >= %s
+                        ),
+                        scored AS (
+                            SELECT i.id, i.content, i.access_count, i.created_at,
+                                   (
+                                       SELECT MAX(1 - (d.embedding <=> i.embedding))
+                                       FROM memories d
+                                       WHERE d.kind = 'doc_chunk'::memory_kind
+                                   ) AS top_doc_sim
+                            FROM interactions i
+                        )
+                        SELECT id, content, access_count, created_at, top_doc_sim
+                        FROM scored
+                        WHERE top_doc_sim IS NULL OR top_doc_sim <= %s
+                        ORDER BY access_count DESC, top_doc_sim ASC NULLS FIRST
+                        LIMIT %s
+                        """,
+                        (int(min_access_count), max_top_sim, limit),
+                    )
+                    rows = await cur.fetchall()
+            gaps = [
+                {
+                    "id": str(r[0]),
+                    "topic": (r[1] or "").strip(),
+                    "access_count": r[2],
+                    "created_at": r[3].isoformat() if r[3] else None,
+                    "top_doc_similarity": round(float(r[4]), 3) if r[4] is not None else None,
+                }
+                for r in rows
+            ]
+            return {
+                "count": len(gaps),
+                "max_top_sim_threshold": max_top_sim,
+                "gaps": gaps,
+                "hint": (
+                    "For each gap, call suggest_doc_update(topic=gap.topic) "
+                    "to fetch target page + supporting insights; if confident, "
+                    "compose prose and invoke propose_doc_patch(prose=...)."
+                ),
+            }
+        except db.MemoryDisabled:
+            return {"error": "semantic memory is disabled"}
+        except Exception as e:
+            return error_response(e)
+
+    @mcp.tool()
     async def suggest_doc_update(topic: str, top_k: int = 8) -> dict:
         """Collect the raw material needed to extend the canonical docs for a topic.
 
@@ -470,9 +545,12 @@ def register(mcp):
         """
         try:
             top_k = max(1, min(int(top_k), 20))
+            # Only insights feed the prose. Interactions are raw query echoes
+            # captured by @record_interaction and tend to tautologise the
+            # topic rather than add facts; they belong in find_doc_gaps as
+            # PR seeds, not in supporting material.
             insights = await store.search(topic, kind="insight", limit=top_k, min_score=0.3)
-            interactions = await store.search(topic, kind="interaction", limit=top_k, min_score=0.3)
-            supporting = sorted(insights + interactions, key=lambda r: r.get("score", 0.0), reverse=True)[:top_k]
+            supporting = sorted(insights, key=lambda r: r.get("score", 0.0), reverse=True)[:top_k]
             if not supporting:
                 return {
                     "topic": topic,
@@ -596,11 +674,10 @@ def register(mcp):
             # Resolve target via suggest_doc_update's logic when not overridden.
             supporting: list[dict] = []
             if not target_path or not target_section:
+                # Only insights here too — see suggest_doc_update for rationale.
                 insights = await store.search(topic, kind="insight",
                                               limit=top_k, min_score=0.3)
-                interactions = await store.search(topic, kind="interaction",
-                                                  limit=top_k, min_score=0.3)
-                supporting = sorted(insights + interactions,
+                supporting = sorted(insights,
                                     key=lambda r: r.get("score", 0.0),
                                     reverse=True)[:top_k]
 
