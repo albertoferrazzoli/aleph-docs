@@ -82,12 +82,17 @@ export function TopBar({ onQuery, query, setQuery, stats, liveEvents, onOpenSett
               padding: '3px 6px',
               fontFamily: 'inherit',
               fontSize: 12,
+              maxWidth: 160,
             }}
-            title="Switch active workspace (changes DB + embedder)"
+            title={
+              (workspaces.find((w) => w.name === activeWorkspace)
+                ? `${activeWorkspace} · ${workspaces.find((w) => w.name === activeWorkspace).backend} · ${workspaces.find((w) => w.name === activeWorkspace).dim}d`
+                : 'Switch active workspace')
+            }
           >
             {workspaces.map((w) => (
-              <option key={w.name} value={w.name}>
-                {w.name} · {w.backend} · {w.dim}d
+              <option key={w.name} value={w.name} title={`${w.backend} · ${w.dim}d`}>
+                {w.name}
               </option>
             ))}
           </select>
