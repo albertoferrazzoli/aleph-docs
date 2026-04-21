@@ -338,6 +338,105 @@ reconciler data flow.
 
 ---
 
+## ⚠️ Costs — READ BEFORE INGESTING
+
+**Aleph Docs calls paid third-party AI APIs (Gemini / Vertex AI by
+default, or whatever `EMBED_BACKEND` points to) every time a file is
+indexed, re-indexed after a content change, or queried for semantic
+search. You — the operator running this stack — are billed directly by
+that provider through your own billing account. There is no middleware
+in this project that caps, meters, refunds, or aggregates those
+charges. Whatever your corpus triggers, your card pays.**
+
+### No warranty, no cost liability
+
+This project is distributed under the PolyForm Noncommercial License
+(see [`LICENSE`](LICENSE)) "AS IS", **without warranty of any kind**.
+In particular, and without limitation:
+
+- **The maintainers and contributors of Aleph Docs are not responsible
+  for any charges, overage, quota exhaustion, bill shock, surprise
+  invoice, unexpected spend or financial loss you incur by running
+  this software against any paid API.**
+- **You alone are responsible** for understanding the pricing of the
+  embedder backend and any other AI service you configure, for setting
+  budgets and alerts on your cloud account, and for sizing the corpus
+  and the reconcile cadence to your budget.
+- **Running `docker compose up` on a large corpus can cost real money
+  within minutes** — especially with video or audio files on
+  `gemini-2-preview`. A single 60-minute video processed through the
+  video-scene chunker can produce dozens of embed calls; a 1000-page
+  PDF corpus similarly. See the estimates below and work out your own
+  number *before* starting the ingest.
+- **No backend provides a "dry run" that previews exact spend.** Any
+  figure here is an approximation from publicly listed prices at the
+  time of writing — prices change, and your actual invoice may differ.
+
+**If you are not prepared to be responsible for these charges, do not
+run this software.** Use at your own risk.
+
+### Indicative pricing per backend
+
+Pricing below is **paid-tier** unit cost as listed by each provider at
+the time of writing (April 2026). **Always verify the current price
+on the provider's official page before running any large ingest** —
+the links are in the last column.
+
+| Backend | Modality | Unit | Price (paid tier) | Source |
+|---|---|---|---|---|
+| `gemini-001` | Text (md chunks) | per 1M input tokens | **$0.15** | [ai.google.dev pricing](https://ai.google.dev/gemini-api/docs/pricing) |
+| `gemini-2-preview` | Text | per 1M tokens | **$0.20** | same |
+| `gemini-2-preview` | **Image** (incl. PDF pages rendered as PNG) | per image | **$0.00012** | same |
+| `gemini-2-preview` | **Audio** | per 1M tokens | **$6.50** | same |
+| `gemini-2-preview` | **Video** | per frame @ 1 fps | **$0.00079** | same |
+| `local` (Ollama + BGE-M3) | Any (uses local compute) | **$0** recurring | electricity only | [Ollama models](https://ollama.com/library) |
+
+### Ballpark cost per corpus size
+
+These are **order-of-magnitude** estimates, not quotes. Real cost
+depends on average chunk size, scene detection density for video,
+number of pages per PDF, and how often content changes (a full
+re-reconcile hashes everything but only re-embeds what differs).
+
+**Assumptions:** `gemini-2-preview`, one full boot-time ingest with
+no retries. Re-running the reconciler without content changes costs
+**zero API calls** thanks to the SHA-256 idempotency, but replacing
+a single large video costs the full cost of re-embedding all its
+scenes.
+
+| Corpus example | Approx. embed calls | Approx. one-shot cost |
+|---|---|---|
+| 50 `.md` pages (500 tokens each) | 50 text calls | **< $0.01** |
+| 10 PDFs × 30 pages each (pages rendered as images) | ~300 image calls | **~$0.04** |
+| 10 MP4 videos × 10 min × ~10 scenes/video (avg 60 s/scene) | ~100 video calls @ 60 frames each | **~$4.70** |
+| 34 MP4 videos × 15 min × ~10 scenes/video (avg 90 s) | ~340 video calls @ 90 frames each | **~$24** |
+| 1 hr audio file (wav/mp3) | 1 audio call at ~60 min token cost | **varies — query `$6.50/1M` × actual tokens** |
+
+### Hard rules before you ingest
+
+1. **Set a billing alert on your GCP / provider account first.** On
+   GCP: [Billing → Budgets & alerts](https://console.cloud.google.com/billing/budgets) — a $10 alert is a cheap insurance policy.
+2. **Start with `INGEST_MEDIA_ON_BOOT=false`** and trigger the
+   reconciler manually via the `reindex_docs()` MCP tool after you
+   have reviewed the file count.
+3. **Test on a small subset** (5-10 files) before the full corpus.
+   The per-file cost logged in `/health.ingest.last_summary` gives
+   you the actual rate before you commit to the whole dataset.
+4. **Watch `/health` during ingest** — the `ingest.processed` counter
+   tells you how many files have been billed so far.
+5. **If you see unexpected 429 `RESOURCE_EXHAUSTED` errors**, your
+   provider has rate-limited you (not billed — those calls are free).
+   Do **not** add client-side retries until you understand your
+   quota; retries on a genuine quota exhaustion can turn a rate limit
+   into a real bill if the backend finally accepts the retried call.
+
+**Once again: you are fully and solely responsible for any and all
+charges your account incurs by running this software. The authors
+accept no liability for any costs, direct or indirect, resulting from
+the use of this project. Use at your own risk.**
+
+---
+
 ## Quick start with Docker (2 minutes)
 
 The fastest way to try Aleph Docs: `docker compose up`. A single command
