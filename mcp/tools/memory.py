@@ -549,7 +549,7 @@ def register(mcp):
             # captured by @record_interaction and tend to tautologise the
             # topic rather than add facts; they belong in find_doc_gaps as
             # PR seeds, not in supporting material.
-            insights = await store.search(topic, kind="insight", limit=top_k, min_score=0.3)
+            insights = await store.search(topic, kind="insight", limit=top_k, min_score=0.5)
             supporting = sorted(insights, key=lambda r: r.get("score", 0.0), reverse=True)[:top_k]
             if not supporting:
                 return {
@@ -571,17 +571,17 @@ def register(mcp):
                     continue
                 page_scores.setdefault(sp, []).append(d.get("score", 0.0))
                 section_of.setdefault(sp, d.get("source_section") or "")
-            candidates = {p: sum(s) for p, s in page_scores.items() if len(s) >= 2}
-            if not candidates:
-                # Fall back to best single-chunk page so the caller still has a hint,
-                # but flag low target confidence.
-                candidates = {p: sum(s) for p, s in page_scores.items()}
+            # Rank pages by the strongest single chunk match (max), not
+            # by sum of all matches. Sum rewards pages that mention the
+            # topic in many weak places (e.g. a generic appendix) over a
+            # single on-point chunk in the right page. Max picks the
+            # page whose most relevant chunk is closest to the topic.
+            strict = {p: max(s) for p, s in page_scores.items() if len(s) >= 2}
+            relaxed = {p: max(s) for p, s in page_scores.items()}
+            candidates = strict or relaxed
             target_path = max(candidates, key=candidates.get) if candidates else None
             target_section = section_of.get(target_path or "", "")
-            target_confidence = 0.0
-            if target_path:
-                chunks_on_target = len(page_scores.get(target_path, []))
-                target_confidence = round(min(1.0, candidates[target_path] / max(2, chunks_on_target)), 3)
+            target_confidence = round(candidates.get(target_path or "", 0.0), 3) if target_path else 0.0
 
             confidence = min(1.0, sum(m.get("score", 0.0) for m in supporting) / len(supporting))
 
@@ -693,7 +693,7 @@ def register(mcp):
             if not target_path or not target_section:
                 # Only insights here too — see suggest_doc_update for rationale.
                 insights = await store.search(topic, kind="insight",
-                                              limit=top_k, min_score=0.3)
+                                              limit=top_k, min_score=0.5)
                 supporting = sorted(insights,
                                     key=lambda r: r.get("score", 0.0),
                                     reverse=True)[:top_k]
@@ -708,9 +708,9 @@ def register(mcp):
                         continue
                     page_scores.setdefault(sp, []).append(d.get("score", 0.0))
                     section_of.setdefault(sp, d.get("source_section") or "")
-                candidates = {p: sum(s) for p, s in page_scores.items() if len(s) >= 2}
-                if not candidates:
-                    candidates = {p: sum(s) for p, s in page_scores.items()}
+                strict = {p: max(s) for p, s in page_scores.items() if len(s) >= 2}
+                relaxed = {p: max(s) for p, s in page_scores.items()}
+                candidates = strict or relaxed
                 resolved_path = max(candidates, key=candidates.get) if candidates else None
                 target_path = target_path or (resolved_path or "")
                 target_section = target_section or section_of.get(resolved_path or "", "")
