@@ -13,10 +13,31 @@ def register(mcp):
     @mcp.tool()
     @record_interaction("search_docs")
     def search_docs(query: str, section: str | None = None, limit: int = 10) -> dict:
-        """Full-text search across the Aleph documentation.
+        """Keyword (lexical) search across MARKDOWN PAGES ONLY.
 
-        Searches all Markdown pages using SQLite FTS5 (BM25 ranked).
-        Returns page path, title, section and a highlighted snippet.
+        ⚠ SCOPE: This searches the `pages_fts` SQLite FTS5 index, which
+        covers *only* `.md`/`.mdx` files under `docs/`. It does NOT see
+        video transcripts, audio transcripts, PDF page text, or image
+        chunks — those live in the memories vector store and are
+        reachable only via `semantic_search` (text + multimodal) or
+        `search_images` (visual).
+
+        When to use THIS tool:
+          • the user asks for exact keywords / flag names in docs
+          • the user asks which markdown page documents X
+          • you need BM25-ranked prose snippets with highlights
+
+        When to use `semantic_search` INSTEAD:
+          • the corpus includes video courses, recorded meetings,
+            screencasts, audio notes, or PDFs (Whisper transcripts and
+            PDF page text are only indexed there)
+          • the user asks conceptual questions ("what does the
+            instructor say about X?", "summarize the course")
+          • you want results ranked by meaning, not token overlap
+
+        Returning zero or few hits here is a strong signal to retry
+        with `semantic_search` before telling the user the corpus is
+        empty — especially for course / tutorial content.
 
         Args:
             query: Search text. Multi-word queries are AND-combined.

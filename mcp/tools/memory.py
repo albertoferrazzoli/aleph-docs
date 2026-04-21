@@ -50,7 +50,9 @@ def register(mcp):
     @mcp.tool()
     async def semantic_search(query: str, kind: str | None = None,
                               limit: int = 10, min_score: float = 0.15) -> dict:
-        """Semantic vector search across the unified memory.
+        """Semantic vector search across the unified memory. **PREFER THIS
+        TOOL** for any content question — it is the only search that
+        sees video/audio/PDF content.
 
         Covers all 9 memory kinds: doc_chunk, interaction, insight
         (text), image, video_scene, audio_clip, pdf_page (media,
@@ -58,6 +60,12 @@ def register(mcp):
         audio_transcript (text embedding of Whisper output on the
         paired scene/clip). Results are ranked by similarity x
         forgetting-curve decay. Each hit is reinforced atomically.
+
+        Call this tool — not `search_docs` — whenever the user asks
+        about course videos, recorded meetings, screencasts, audio
+        notes, or PDF content. `search_docs` is a Markdown-only FTS5
+        keyword index and will appear to return an empty corpus for
+        video/audio/PDF-dominated libraries.
 
         TIP for course / narrated content: filter with
         kind="video_transcript" or "audio_transcript" when you want
