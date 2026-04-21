@@ -32,6 +32,48 @@ function applyDecay(stability, dtDays, curve) {
   return Math.exp(-dtDays / stability);
 }
 
+// Small localStorage-backed useState. `serialize`/`deserialize` let callers
+// round-trip non-JSON values (e.g. Sets) transparently. Keys are namespaced
+// under "aleph:" to avoid collisions with other apps on the same origin.
+function usePersistedState(key, initial, { serialize, deserialize } = {}) {
+  const fullKey = `aleph:${key}`;
+  const [value, setValue] = useState(() => {
+    if (typeof window === 'undefined') return initial;
+    try {
+      const raw = window.localStorage.getItem(fullKey);
+      if (raw == null) return initial;
+      const parsed = JSON.parse(raw);
+      return deserialize ? deserialize(parsed) : parsed;
+    } catch {
+      return initial;
+    }
+  });
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    try {
+      const out = serialize ? serialize(value) : value;
+      window.localStorage.setItem(fullKey, JSON.stringify(out));
+    } catch {
+      // Quota exceeded or serialization error — drop silently.
+    }
+  }, [fullKey, value, serialize]);
+  return [value, setValue];
+}
+
+// filters.kinds is a Set — localStorage is plain JSON so serialize via array.
+const FILTERS_DEFAULT = {
+  kinds: new Set([
+    'doc_chunk', 'interaction', 'insight',
+    'image', 'video_scene', 'audio_clip', 'pdf_page',
+  ]),
+  minScore: 0.05,
+};
+const filtersSerialize = (f) => ({ kinds: Array.from(f.kinds), minScore: f.minScore });
+const filtersDeserialize = (raw) => ({
+  kinds: new Set(Array.isArray(raw?.kinds) ? raw.kinds : FILTERS_DEFAULT.kinds),
+  minScore: typeof raw?.minScore === 'number' ? raw.minScore : FILTERS_DEFAULT.minScore,
+});
+
 export default function App() {
   const nodes = useAlephStore((s) => s.nodes);
   const edges = useAlephStore((s) => s.edges);
@@ -50,24 +92,21 @@ export default function App() {
   const requestFit = useCallback(() => setFitViewTrigger((n) => n + 1), []);
   const [query, setQuery] = useState('');
   const [results, setResults] = useState(null);
-  const [selectedId, setSelectedId] = useState(null);
+  const [selectedId, setSelectedId] = usePersistedState('selectedId', null);
   const [hoveredId, setHoveredId] = useState(null);
   const [hoverPos, setHoverPos] = useState({ x: 0, y: 0 });
   const [isolated, setIsolated] = useState(false);
   const [timeShift, setTimeShift] = useState(0);
-  const [events, setEvents] = useState([]);
+  const [events, setEvents] = usePersistedState('events', []);
   const [tweaksVisible, setTweaksVisible] = useState(false);
-  const [tweaks, setTweaks] = useState(TWEAK_DEFAULTS);
-  const [filters, setFilters] = useState({
-    kinds: new Set([
-      'doc_chunk', 'interaction', 'insight',
-      'image', 'video_scene', 'audio_clip', 'pdf_page',
-    ]),
-    minScore: 0.05,
-  });
-  const [colorMode, setColorMode] = useState('kind');
-  const [sizeMode, setSizeMode] = useState('access');
-  const [edgeCutoff, setEdgeCutoff] = useState(0.45);
+  const [tweaks, setTweaks] = usePersistedState('tweaks', TWEAK_DEFAULTS);
+  const [filters, setFilters] = usePersistedState(
+    'filters', FILTERS_DEFAULT,
+    { serialize: filtersSerialize, deserialize: filtersDeserialize },
+  );
+  const [colorMode, setColorMode] = usePersistedState('colorMode', 'kind');
+  const [sizeMode, setSizeMode] = usePersistedState('sizeMode', 'access');
+  const [edgeCutoff, setEdgeCutoff] = usePersistedState('edgeCutoff', 0.45);
   const [zoomTarget, setZoomTarget] = useState(null);
 
   // Buffered patches to avoid re-rendering on every SSE event
