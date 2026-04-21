@@ -38,8 +38,19 @@ log = logging.getLogger("aleph")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Activate the persisted workspace BEFORE the pool opens so env
+    # vars (PG_DSN dbname) are in place. activate() handles pool init
+    # internally. Falls back to a plain init_pool when no workspaces
+    # are configured.
     try:
-        await db.init_pool()
+        from memory import workspace_manager as _wm  # type: ignore
+        ws = _wm.resolve_initial()
+        if ws is not None:
+            await _wm.activate(ws)
+            log.info("[aleph/workspaces] active=%s docs=%s pg_db=%s",
+                     ws.name, ws.docs_path, ws.pg_db)
+        else:
+            await db.init_pool()
     except Exception as e:
         log.warning("[aleph] init_pool failed at startup: %s", e)
     yield
@@ -496,6 +507,57 @@ async def get_media(memory_id: str, request: Request) -> FileResponse:
 # ---------------------------------------------------------------------------
 # Write endpoints
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Workspaces
+# ---------------------------------------------------------------------------
+
+class SwitchWorkspaceBody(BaseModel):
+    name: str = Field(..., min_length=1)
+    reindex: bool = True
+
+
+@app.get("/workspaces")
+async def get_workspaces() -> JSONResponse:
+    """List configured workspaces and mark the active one."""
+    try:
+        from memory.workspaces import load_workspaces  # type: ignore
+        from memory.workspace_state import read_active  # type: ignore
+        workspaces = [w.to_dict() for w in load_workspaces()]
+        active = read_active() or (workspaces[0]["name"] if workspaces else None)
+        return JSONResponse({"active": active, "workspaces": workspaces})
+    except Exception as e:
+        log.warning("[aleph] /workspaces failed: %s", e)
+        raise HTTPException(500, f"workspaces listing failed: {e}")
+
+
+@app.post("/workspaces/active", dependencies=[Depends(require_api_key)])
+async def set_active_workspace(body: SwitchWorkspaceBody) -> JSONResponse:
+    """Switch the active workspace in-process + persist the choice.
+
+    Rewrites env, swaps the pool against the target DB, resets the
+    embedder cache. The state file is the source of truth for both
+    the aleph backend and the mcp — the mcp watches it and
+    re-activates automatically within a few seconds.
+    """
+    try:
+        from memory import workspace_manager as _wm  # type: ignore
+        from memory.workspaces import get_by_name, load_workspaces  # type: ignore
+        ws = get_by_name(body.name)
+        if ws is None:
+            return JSONResponse(
+                {
+                    "error": f"unknown workspace {body.name!r}",
+                    "available": [w.name for w in load_workspaces()],
+                },
+                status_code=404,
+            )
+        summary = await _wm.activate(ws)
+        return JSONResponse(summary)
+    except Exception as e:
+        log.warning("[aleph] /workspaces/active failed: %s", e)
+        raise HTTPException(500, f"workspace switch failed: {e}")
+
 
 @app.post("/remember", dependencies=[Depends(require_api_key)])
 async def remember(body: RememberBody) -> JSONResponse:

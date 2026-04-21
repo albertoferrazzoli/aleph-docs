@@ -7,7 +7,7 @@ import { useAlephStore } from './store.js';
 import {
   fetchGraph, searchGraph, remember as apiRemember, forget as apiForget,
   openStream, getWriteKey, setWriteKey, getBasicAuth, clearAuth, redirectToLogin,
-  fetchNodeAudit, fetchNode,
+  fetchNodeAudit, fetchNode, fetchWorkspaces, setActiveWorkspace,
 } from './api.js';
 
 // Hard auth guard: if there's no stored Basic Auth blob, bounce to the
@@ -110,6 +110,36 @@ export default function App() {
   const [sizeMode, setSizeMode] = usePersistedState('sizeMode', 'access');
   const [edgeCutoff, setEdgeCutoff] = usePersistedState('edgeCutoff', 0.45);
   const [zoomTarget, setZoomTarget] = useState(null);
+
+  // Workspaces — loaded once at mount, refreshed after switch.
+  const [workspaces, setWorkspaces] = useState([]);
+  const [activeWorkspace, setActiveWorkspaceName] = useState(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchWorkspaces()
+      .then((r) => {
+        if (cancelled) return;
+        setWorkspaces(r.workspaces || []);
+        setActiveWorkspaceName(r.active || null);
+      })
+      .catch(() => { /* non-fatal */ });
+    return () => { cancelled = true; };
+  }, []);
+
+  const onSwitchWorkspace = useCallback(async (name) => {
+    if (!name || name === activeWorkspace) return;
+    try {
+      await setActiveWorkspace(name, false);
+      setActiveWorkspaceName(name);
+      // Hard reload: graph + stats + stream all have to be rebuilt
+      // against the new DB. Simpler (and safer) than wiring every
+      // piece of state through a live swap.
+      window.location.reload();
+    } catch (e) {
+      alert('switch failed: ' + (e.message || e));
+    }
+  }, [activeWorkspace]);
 
   // Buffered patches to avoid re-rendering on every SSE event
   const pendingPatches = useRef([]);
@@ -483,6 +513,9 @@ export default function App() {
         stats={stats}
         liveEvents={tweaks.live}
         onOpenSettings={onOpenSettings}
+        workspaces={workspaces}
+        activeWorkspace={activeWorkspace}
+        onSwitchWorkspace={onSwitchWorkspace}
       />
 
       <LeftRail

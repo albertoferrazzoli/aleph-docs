@@ -116,6 +116,9 @@ services:
     volumes:
       - ./docs:/docs:ro
       - mcp_data:/data
+      # Multi-workspace config. Optional; when absent the MCP runs a
+      # single "default" workspace backed by the .env vars.
+      - ./workspaces.yaml:/app/workspaces.yaml:ro
 
   aleph:
     build:
@@ -139,6 +142,16 @@ services:
       EMBED_BACKEND: ${EMBED_BACKEND:-gemini-001}
       EMBED_DIM: ${EMBED_DIM:-1536}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      # Propagate embedder host overrides so the aleph process can
+      # embed search queries against whichever backend the active
+      # workspace declares.
+      OLLAMA_HOST: ${OLLAMA_HOST:-http://ollama:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-bge-m3}
+      LOCAL_EMBED_DIM: ${LOCAL_EMBED_DIM:-1024}
+      EMBED_NOMIC_HOST: ${EMBED_NOMIC_HOST:-http://host.docker.internal:8091}
+      EMBED_NOMIC_TIMEOUT_S: ${EMBED_NOMIC_TIMEOUT_S:-60}
+      LOCAL_DOCS_PATH: /docs
+      HYBRID_MEDIA_EMBEDDING: ${HYBRID_MEDIA_EMBEDDING:-true}
       MEDIA_ROOT: /docs
       # Auto-projection task: rebuilds the 3D graph snapshot as memories
       # change. Debounce + max-staleness (seconds).
@@ -148,6 +161,12 @@ services:
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     volumes:
       - ./docs:/docs:ro
+      # Share the mcp state dir so both processes see the same active-
+      # workspace file. The mcp is the writer-primary; aleph reads it
+      # on boot and writes when the user switches via the viewer.
+      - mcp_data:/data
+      # Workspaces config (optional).
+      - ./workspaces.yaml:/app/workspaces.yaml:ro
 
 volumes:
   db_data:

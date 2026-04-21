@@ -1,0 +1,26 @@
+# Aleph Docs — workspaces configuration.
+# Each entry defines a (docs folder, embedder backend, Postgres DB)
+# triplet. MCP boots on the persisted active workspace or the first
+# one in this list. Switch at runtime via the `switch_workspace` MCP
+# tool or the workspace selector in the aleph viewer.
+#
+# Leaving this file absent falls back to legacy single-workspace
+# behavior driven by .env vars.
+
+- name: trading_course
+  docs_path: /docs
+  backend: nomic_multimodal_local
+  dim: 768
+  # Reuse the default DB — this workspace is the one that was already
+  # ingested before multi-workspace support landed. The scratch
+  # workspace below uses its own DB for experiments.
+  pg_db: aleph_memory
+  hybrid: true
+
+- name: scratch
+  docs_path: /docs
+  backend: local
+  dim: 1024
+  pg_db: aleph_scratch
+  hybrid: false
+  local_embed_dim: 1024

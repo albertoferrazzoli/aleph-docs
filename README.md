@@ -151,6 +151,7 @@ a few cents a year to maintain, and never loses the audit trail.
 | **Multimodal corpora** | Markdown / images / video / audio / PDF indexed side by side into one pgvector space |
 | **Pluggable embedders** | Four backends selectable via `EMBED_BACKEND`: `gemini-001` (cheap cloud text), `gemini-2-preview` (multimodal cloud), `local` (Ollama, free text-only), **`nomic_multimodal_local`** (free text + image in the same 768-dim space, via host-side FastAPI — see [docs/EMBED_NOMIC_SETUP.md](docs/EMBED_NOMIC_SETUP.md)) |
 | **Unified retrieval** | One `search(query, kind?)` tool covers all 10 memory kinds (doc_chunk / insight / interaction / image / video_scene / audio_clip / pdf_page / video_transcript / audio_transcript / pdf_text). `min_score` auto-tunes per modality so visual hits aren't silently filtered out. `memory_stats()` gives the per-kind corpus overview |
+| **Multi-workspace** | Ship a `workspaces.yaml` at the repo root to host several isolated corpora on one stack — each with its own Postgres database, docs root, embedder backend and dim. Switch at runtime via the viewer dropdown or the `switch_workspace` MCP tool. No file = single-workspace legacy behavior driven by .env |
 | Lexical search over docs | SQLite FTS5, kept in sync incrementally — `git diff` in git mode, `watchdog` + SHA-256 diff in local mode |
 | Semantic search (docs + insights + interactions, across modalities) | pgvector HNSW with cosine + Ebbinghaus decay (canonical kinds — docs, images, pdf pages, video scenes, audio clips — are exempt from decay and never fall off) |
 | Auto-reinforcement | Every hit bumps `stability × 1.7`, `access_count += 1` |
@@ -351,6 +352,58 @@ inside the container manually.
 See [`docs/README.md`](docs/README.md) for a walkthrough of populating
 the local corpus, and [`ARCHITECTURE.md`](ARCHITECTURE.md) for the
 reconciler data flow.
+
+---
+
+## Multi-workspace — several corpora on one stack
+
+A single Aleph Docs deployment can host multiple **workspaces**, each
+with its own Postgres database, docs folder, embedder backend and
+embed-dim. You switch between them at runtime from the dropdown in
+the viewer's top bar, or via the `switch_workspace` MCP tool from a
+client like Claude Desktop.
+
+Declare workspaces in `workspaces.yaml` at the repo root — template
+in [`workspaces.yaml.example`](workspaces.yaml.example):
+
+```yaml
+- name: trading_course
+  docs_path: /docs                 # path INSIDE the mcp container
+  backend: nomic_multimodal_local  # EMBED_BACKEND name
+  dim: 768                         # must match the backend's native dim
+  pg_db: aleph_memory              # Postgres database on the shared server
+  hybrid: true                     # HYBRID_MEDIA_EMBEDDING
+
+- name: company_docs
+  docs_path: /docs/acme
+  backend: local
+  dim: 1024
+  pg_db: aleph_acme
+  hybrid: false
+  local_embed_dim: 1024            # only when backend=local (Ollama)
+```
+
+When you switch workspaces:
+1. Target Postgres DB is created on demand if missing; the schema is
+   loaded with the correct `vector(N)` dim.
+2. The MCP's connection pool is closed and re-opened against the new
+   DB, the embedder cache is invalidated.
+3. The aleph viewer reloads its 3D scene against the new corpus.
+4. The active workspace name is persisted on the `mcp_data` volume,
+   so a container restart resumes where you left off.
+
+State file is the source of truth — the MCP polls it every 5 s, so a
+switch from the viewer is mirrored in your Claude Desktop MCP session
+within seconds without a restart.
+
+If `workspaces.yaml` is absent, a single `default` workspace is built
+from the legacy `.env` vars — nothing changes for single-corpus users.
+
+**Limitation**: the Markdown FTS5 index (used only by the narrow
+lookup tools like `find_command_line_option`) is not re-scoped per
+workspace yet; it still sees whatever lives under the container-level
+`/docs`. The vector memory store — the primary retrieval surface —
+is fully isolated.
 
 ---
 

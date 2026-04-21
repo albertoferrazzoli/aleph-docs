@@ -135,10 +135,54 @@ if __name__ == "__main__":
 
     @asynccontextmanager
     async def combined_lifespan(_app):
+        # Activate the persisted workspace (or the first one in
+        # workspaces.yaml) BEFORE the pool opens — activate() sets the
+        # env vars db.init_pool() will read. When no workspaces.yaml
+        # exists, activate() is a cheap no-op that still refreshes the
+        # pool against the legacy .env PG_DSN.
         try:
-            await memory_db.init_pool()
+            from memory import workspace_manager as _wm
+            ws = _wm.resolve_initial()
+            if ws is not None:
+                await _wm.activate(ws)
+                print(f"[workspaces] active = {ws.name} "
+                      f"(backend={ws.backend} dim={ws.dim} docs={ws.docs_path})")
+            else:
+                await memory_db.init_pool()
         except Exception as e:
             print(f"[memory] pool init failed (continuing without memory): {e}")
+
+        # Workspace state watcher: the aleph backend (or another
+        # controller) can switch workspaces by writing the state file.
+        # This coroutine polls it and re-activates in the mcp process
+        # so Claude Desktop's MCP session tracks the viewer's choice.
+        workspace_watcher_task = None
+        try:
+            from memory import workspace_state as _ws_state, workspace_manager as _wm2
+            from memory.workspaces import get_by_name as _get_ws_by_name
+
+            async def _workspace_watcher():
+                current = _ws_state.read_active()
+                while True:
+                    await asyncio.sleep(5.0)
+                    try:
+                        latest = _ws_state.read_active()
+                        if latest and latest != current:
+                            match = _get_ws_by_name(latest)
+                            if match:
+                                print(f"[workspaces] state change detected: "
+                                      f"{current!r} -> {latest!r}; re-activating")
+                                await _wm2.activate(match)
+                                current = latest
+                            else:
+                                # Dropped from config — don't flap.
+                                current = latest
+                    except Exception as e:
+                        print(f"[workspaces] watcher tick failed: {e}")
+
+            workspace_watcher_task = asyncio.create_task(_workspace_watcher())
+        except Exception as e:
+            print(f"[workspaces] watcher setup failed (continuing): {e}")
 
         # Media reconciler: background task + (optional) filesystem watcher.
         # In DOCS_MODE=git the initial run happens here (piggybacks on the
@@ -198,6 +242,11 @@ if __name__ == "__main__":
                 try:
                     if not ingest_bg_task.done():
                         ingest_bg_task.cancel()
+                except Exception:
+                    pass
+            if workspace_watcher_task is not None:
+                try:
+                    workspace_watcher_task.cancel()
                 except Exception:
                     pass
             try:

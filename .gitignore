@@ -4,6 +4,10 @@
 !.env.example
 *.htpasswd
 
+# Per-user workspaces config — template ships, live file is local.
+workspaces.yaml
+!workspaces.yaml.example
+
 # Python
 __pycache__/
 *.py[cod]

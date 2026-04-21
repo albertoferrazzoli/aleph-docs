@@ -54,7 +54,7 @@ export const KIND_GROUPS = [
 
 const kindLabel = (k) => KIND_LABELS[k] || k;
 
-export function TopBar({ onQuery, query, setQuery, stats, liveEvents, onOpenSettings }) {
+export function TopBar({ onQuery, query, setQuery, stats, liveEvents, onOpenSettings, workspaces, activeWorkspace, onSwitchWorkspace }) {
   return (
     <div className="topbar">
       <div className="brand">
@@ -64,6 +64,35 @@ export function TopBar({ onQuery, query, setQuery, stats, liveEvents, onOpenSett
           <div className="brand-sub">semantic memory — aleph-docs-mcp MCP</div>
         </div>
       </div>
+
+      {workspaces && workspaces.length > 0 && (
+        <div className="workspace-selector" style={{
+          display: 'flex', alignItems: 'center', gap: 6,
+          marginLeft: 12, fontSize: 12,
+        }}>
+          <span style={{ opacity: 0.6 }}>workspace</span>
+          <select
+            value={activeWorkspace || ''}
+            onChange={(e) => onSwitchWorkspace && onSwitchWorkspace(e.target.value)}
+            style={{
+              background: 'rgba(255,255,255,0.04)',
+              color: 'inherit',
+              border: '1px solid rgba(255,255,255,0.12)',
+              borderRadius: 4,
+              padding: '3px 6px',
+              fontFamily: 'inherit',
+              fontSize: 12,
+            }}
+            title="Switch active workspace (changes DB + embedder)"
+          >
+            {workspaces.map((w) => (
+              <option key={w.name} value={w.name}>
+                {w.name} · {w.backend} · {w.dim}d
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
 
       <form
         className="query-form"

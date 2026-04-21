@@ -118,6 +118,18 @@ export async function fetchNodeAudit(id, limit = 20) {
   return req(`/node/${encodeURIComponent(id)}/audit?limit=${limit}`);
 }
 
+export async function fetchWorkspaces() {
+  return req('/workspaces');
+}
+
+export async function setActiveWorkspace(name, reindex = false) {
+  return req('/workspaces/active', {
+    method: 'POST',
+    body: { name, reindex },
+    write: true,
+  });
+}
+
 // EventSource connection with auto-reconnect / backoff.
 // The backend emits NAMED events (`event: memory_change`, `event: version_bump`,
 // `event: ping`, `event: error`), so the default `onmessage` handler never

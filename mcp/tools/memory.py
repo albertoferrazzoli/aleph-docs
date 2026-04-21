@@ -466,6 +466,91 @@ def register(mcp):
             return error_response(e)
 
     @mcp.tool()
+    async def list_workspaces() -> dict:
+        """List every configured workspace and mark the active one.
+
+        Workspaces are declared in `workspaces.yaml` at the repo root.
+        Each entry bundles (docs_path, embedder backend, embed dim,
+        Postgres database name, hybrid flag) — switching between them
+        swaps the underlying DB so a single MCP server can host
+        multiple isolated corpora (e.g. a trading course + a company
+        docs folder). When no workspaces.yaml is present, exposes a
+        single ``default`` workspace built from the legacy .env vars.
+
+        Use this BEFORE `switch_workspace` to discover valid names.
+        """
+        try:
+            from memory.workspaces import load_workspaces
+            from memory.workspace_state import read_active
+            workspaces = [w.to_dict() for w in load_workspaces()]
+            active = read_active() or (workspaces[0]["name"] if workspaces else None)
+            return {"active": active, "workspaces": workspaces}
+        except Exception as e:
+            return error_response(e)
+
+    @mcp.tool()
+    async def switch_workspace(name: str, reindex: bool = True) -> dict:
+        """Switch the active workspace (DB + embedder + docs root).
+
+        Effects, applied atomically in-process:
+          - env vars updated (PG_DSN dbname, EMBED_BACKEND, EMBED_DIM,
+            HYBRID_MEDIA_EMBEDDING, LOCAL_DOCS_PATH, LOCAL_EMBED_DIM)
+          - target Postgres database created if missing, schema loaded
+            with the correct vector(N) dim
+          - connection pool closed and re-opened against the new DB
+          - embedder cache invalidated so the new backend takes effect
+          - active workspace persisted on the mcp_data volume
+
+        When `reindex=True` (default), a reconcile of the new docs
+        root is kicked off in the background — progress visible on
+        /health. Set false to switch without triggering ingest (useful
+        if you know the DB is already populated and you just want to
+        query it).
+
+        Args:
+            name: Name of a workspace defined in workspaces.yaml.
+            reindex: Whether to kick off a reconcile after the switch.
+        """
+        try:
+            from memory import workspace_manager
+            from memory.workspaces import get_by_name
+            ws = get_by_name(name)
+            if ws is None:
+                from memory.workspaces import load_workspaces
+                return {
+                    "error": f"unknown workspace {name!r}",
+                    "available": [w.name for w in load_workspaces()],
+                }
+            summary = await workspace_manager.activate(ws)
+            if reindex:
+                # Fire-and-forget reconcile — progress shows up on /health.
+                import asyncio
+                from memory.ingest_task import get_ingest_task
+                from pathlib import Path as _Path
+                it = get_ingest_task()
+
+                async def _kick():
+                    try:
+                        await it.run_once(
+                            mode="local",
+                            root=_Path(ws.docs_path),
+                            repo_root=_Path(ws.docs_path),
+                            content_sub="",
+                        )
+                    except Exception as e:
+                        log.warning("[workspaces] post-switch reconcile failed: %s", e)
+
+                asyncio.create_task(_kick())
+                summary["reindex"] = "kicked"
+            else:
+                summary["reindex"] = "skipped"
+            return summary
+        except db.MemoryDisabled:
+            return {"error": "semantic memory is disabled"}
+        except Exception as e:
+            return error_response(e)
+
+    @mcp.tool()
     async def recall(query: str, limit: int = 10) -> dict:
         """Search only your accumulated insights + past interactions.
 
