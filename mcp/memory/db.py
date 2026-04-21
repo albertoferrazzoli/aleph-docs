@@ -99,9 +99,21 @@ async def close_pool() -> None:
 async def get_conn():
     """Async context manager yielding a pooled connection.
 
-    Raises MemoryDisabled if the memory subsystem is off or the pool was
-    never initialized.
+    Self-heals a dropped pool: if the memory subsystem is enabled in
+    env but `_pool` is None (e.g. a previous workspace switch closed
+    it and never re-opened, or a LISTEN/NOTIFY crash nuked it), we
+    attempt one re-init before giving up. Raises MemoryDisabled only
+    if env says memory is off or the re-init itself fails.
     """
+    global _pool, _enabled
+    if _pool is None:
+        # Try to recover — cheap and idempotent.
+        try:
+            await init_pool()
+        except Exception as e:
+            raise MemoryDisabled(
+                f"memory subsystem could not self-heal its pool: {e}"
+            ) from e
     if not _enabled or _pool is None:
         raise MemoryDisabled("memory subsystem is disabled or not initialized")
     async with _pool.connection() as conn:
@@ -109,7 +121,19 @@ async def get_conn():
 
 
 async def health_check() -> dict:
-    """Return a structured health report. Never raises."""
+    """Return a structured health report. Never raises.
+
+    Same self-heal as get_conn(): when env says memory is on but the
+    pool has been nuked (workspace switch race, LISTEN/NOTIFY crash,
+    etc.) we try to re-init before reporting degraded.
+    """
+    # Self-heal before reporting disabled.
+    if _pool is None:
+        try:
+            await init_pool()
+        except Exception as e:
+            log.warning("[memory] health_check: pool re-init failed: %s", e)
+
     if not _enabled:
         return {
             "enabled": False,
