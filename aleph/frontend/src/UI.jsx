@@ -103,7 +103,7 @@ export function TopBar({ onQuery, query, setQuery, stats, liveEvents, onOpenSett
         className="query-form"
         onSubmit={(e) => { e.preventDefault(); onQuery(query); }}
       >
-        <span className="query-prefix">semantic_search</span>
+        <span className="query-prefix">search</span>
         <input
           id="query-input"
           value={query}
@@ -115,17 +115,9 @@ export function TopBar({ onQuery, query, setQuery, stats, liveEvents, onOpenSett
       </form>
 
       <div className="stats">
-        <Stat label="n" value={stats.total} />
-        <Stat label="doc" value={stats.doc} dotColor={KIND_SWATCH.doc_chunk} />
-        <Stat label="int" value={stats.interaction} dotColor={KIND_SWATCH.interaction} />
-        <Stat label="ins" value={stats.insight} dotColor={KIND_SWATCH.insight} />
-        <Stat label="img" value={stats.image} dotColor={KIND_SWATCH.image} />
-        <Stat label="vid" value={stats.video_scene} dotColor={KIND_SWATCH.video_scene} />
-        <Stat label="vtx" value={stats.video_transcript} dotColor={KIND_SWATCH.video_transcript} />
-        <Stat label="aud" value={stats.audio_clip} dotColor={KIND_SWATCH.audio_clip} />
-        <Stat label="atx" value={stats.audio_transcript} dotColor={KIND_SWATCH.audio_transcript} />
-        <Stat label="pdf" value={stats.pdf_page} dotColor={KIND_SWATCH.pdf_page} />
-        <Stat label="ptx" value={stats.pdf_text} dotColor={KIND_SWATCH.pdf_text} />
+        {/* Per-kind counters removed from the top bar — they pinched the
+            query box on narrow windows. Totals are still visible in the
+            left-rail filter panel. */}
         <div className="live-badge">
           <span className={'live-dot ' + (liveEvents ? 'on' : 'off')} />
           <span>stream</span>

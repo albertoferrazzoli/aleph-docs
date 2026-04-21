@@ -38,10 +38,13 @@ log = logging.getLogger("aleph")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Activate the persisted workspace BEFORE the pool opens so env
-    # vars (PG_DSN dbname) are in place. activate() handles pool init
-    # internally. Falls back to a plain init_pool when no workspaces
-    # are configured.
+    # Apply the persisted workspace at startup so the pool points at
+    # the right DB. To avoid fighting the mcp process (whose watcher
+    # polls the same state file), aleph only ACTIVATES its local
+    # view — the POST /workspaces/active endpoint is the sole path
+    # that writes the state file. Boot-time activation stays a local
+    # no-op when activate() coincidentally overwrites with the same
+    # name; that's fine.
     try:
         from memory import workspace_manager as _wm  # type: ignore
         ws = _wm.resolve_initial()

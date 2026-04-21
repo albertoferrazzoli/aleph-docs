@@ -174,6 +174,32 @@ if __name__ == "__main__":
                                       f"{current!r} -> {latest!r}; re-activating")
                                 await _wm2.activate(match)
                                 current = latest
+                                # Kick an ingest against the new docs
+                                # root. The task manager serialises, so
+                                # we won't double up with anything in
+                                # flight. No-op on already-populated
+                                # DBs thanks to SHA256 idempotency.
+                                try:
+                                    from memory.ingest_task import get_ingest_task as _git
+                                    from pathlib import Path as _P
+
+                                    async def _kick():
+                                        try:
+                                            it2 = _git()
+                                            await it2.run_once(
+                                                mode="local",
+                                                root=_P(match.docs_path),
+                                                repo_root=_P(match.docs_path),
+                                                content_sub="",
+                                            )
+                                        except Exception as e:
+                                            print(f"[workspaces] post-switch "
+                                                  f"ingest failed: {e}")
+
+                                    asyncio.create_task(_kick())
+                                except Exception as e:
+                                    print(f"[workspaces] could not schedule "
+                                          f"post-switch ingest: {e}")
                             else:
                                 # Dropped from config — don't flap.
                                 current = latest

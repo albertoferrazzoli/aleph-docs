@@ -173,6 +173,56 @@ async def activate(ws: Workspace) -> dict:
     # EMBED_BACKEND env var instead of the cached instance.
     embedders._reset_cache_for_tests()
 
+    # 4b) indexer path refresh + markdown rebuild — the `indexer`
+    # module captures REPO_PATH / LOCAL_DOCS_PATH at import time, so
+    # without this step the markdown indexer would keep scanning the
+    # previous workspace's tree and cross-pollute doc_chunks. We also
+    # drop and re-populate the SQLite FTS5 pages table so lexical
+    # lookups track the new workspace's scope, and re-embed the new
+    # doc_chunks into the workspace's DB.
+    try:
+        import indexer as _indexer  # type: ignore
+        if hasattr(_indexer, "refresh_paths"):
+            _indexer.refresh_paths()
+        if hasattr(_indexer, "open_db") and hasattr(_indexer, "iter_doc_files"):
+            # Re-implement `indexer.rebuild()` in async-safe form:
+            # its stock version calls `asyncio.run(_flush_memory(...))`
+            # which blows up inside our running loop.
+            sconn = _indexer.open_db()
+            try:
+                _indexer._pending_embeds.clear()
+                _indexer._pending_images.clear()
+                sconn.executescript(
+                    "DELETE FROM pages; DELETE FROM pages_fts; "
+                    "DELETE FROM code_blocks; DELETE FROM code_blocks_fts;"
+                )
+                n = 0
+                for abs_path in _indexer.iter_doc_files(_indexer.REPO_PATH):
+                    rel = abs_path.relative_to(
+                        _indexer.REPO_PATH / _indexer.CONTENT_SUBDIR
+                        if _indexer.CONTENT_SUBDIR else _indexer.REPO_PATH
+                    ).as_posix()
+                    _indexer.upsert_page(sconn, rel, abs_path)
+                    n += 1
+                _indexer.set_meta(sconn, "last_indexed_at", str(int(__import__("time").time())))
+                sconn.commit()
+                log.info("[workspaces] markdown rebuild for %s: %d pages", ws.name, n)
+                pending = list(_indexer._pending_embeds)
+                pending_images = list(_indexer._pending_images)
+                _indexer._pending_embeds.clear()
+                _indexer._pending_images.clear()
+                if pending or pending_images:
+                    await _indexer._flush_memory(pending, pending_images)
+                    log.info("[workspaces] markdown embed flush: %d doc_chunks, "
+                             "%d image refs", len(pending), len(pending_images))
+            finally:
+                try:
+                    sconn.close()
+                except Exception:
+                    pass
+    except Exception as e:
+        log.warning("[workspaces] indexer refresh/rebuild failed: %s", e)
+
     # 5) persist
     workspace_state.write_active(ws.name)
 

@@ -149,6 +149,25 @@ _default_subdir = "content" if DOCS_MODE == "git" else ""
 CONTENT_SUBDIR = os.environ.get("CONTENT_SUBDIR", _default_subdir)
 
 
+def refresh_paths() -> None:
+    """Re-read env-backed paths so a workspace switch reshapes the
+    markdown indexer's view of the world without reimporting the
+    module. Call this from workspace_manager.activate() after the
+    new workspace env has been applied.
+    """
+    global REPO_URL, REPO_PATH, DOCS_MODE, LOCAL_DOCS_PATH, CONTENT_SUBDIR
+    REPO_URL = os.environ.get("DOCS_REPO_URL", "").strip()
+    REPO_PATH = Path(os.environ.get("DOCS_REPO_PATH", "repo")).resolve()
+    LOCAL_DOCS_PATH = Path(
+        os.environ.get("LOCAL_DOCS_PATH", str(_default_local))
+    ).resolve()
+    DOCS_MODE = "git" if REPO_URL else "local"
+    if DOCS_MODE == "local":
+        REPO_PATH = LOCAL_DOCS_PATH
+    default_subdir = "content" if DOCS_MODE == "git" else ""
+    CONTENT_SUBDIR = os.environ.get("CONTENT_SUBDIR", default_subdir)
+
+
 # ---------------------------------------------------------------------------
 # Git operations
 # ---------------------------------------------------------------------------
