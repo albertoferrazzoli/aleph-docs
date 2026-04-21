@@ -72,6 +72,9 @@ services:
       OLLAMA_HOST: ${OLLAMA_HOST:-http://ollama:11434}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-bge-m3}
       LOCAL_EMBED_DIM: ${LOCAL_EMBED_DIM:-1024}
+      # Reconciler: set false to skip the boot-time media scan and rely
+      # only on the watcher (local mode) or on-demand reindex_docs().
+      INGEST_MEDIA_ON_BOOT: ${INGEST_MEDIA_ON_BOOT:-true}
       # Lint
       LINT_MODE: ${LINT_MODE:-auto}
       # Optional: doc-patch PR back to canonical git
@@ -104,6 +107,11 @@ services:
       EMBED_DIM: ${EMBED_DIM:-1536}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
       MEDIA_ROOT: /docs
+      # Auto-projection task: rebuilds the 3D graph snapshot as memories
+      # change. Debounce + max-staleness (seconds).
+      AUTO_PROJECTION: ${AUTO_PROJECTION:-true}
+      PROJECTION_DEBOUNCE_S: ${PROJECTION_DEBOUNCE_S:-30}
+      PROJECTION_MAX_STALE_S: ${PROJECTION_MAX_STALE_S:-120}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
     volumes:
       - ./docs:/docs:ro
