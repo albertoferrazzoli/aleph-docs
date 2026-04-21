@@ -586,7 +586,14 @@ async def delete_by_source_path(
 # list_media_source_paths_with_hash — DB-side state for the reconciler diff.
 # ---------------------------------------------------------------------------
 
-_MEDIA_KINDS_SQL = ("image", "video_scene", "audio_clip", "pdf_page")
+_MEDIA_KINDS_SQL = (
+    "image", "video_scene", "audio_clip", "pdf_page",
+    # Text-embedded media kinds must be tracked here too — otherwise
+    # the reconciler can't tell that e.g. a video is "already done in
+    # HYBRID=false mode" (video_transcript-only) and re-ingests it
+    # every run, creating duplicates.
+    "video_transcript", "audio_transcript", "pdf_text",
+)
 
 
 async def list_media_source_paths_with_hash() -> dict[str, dict]:
