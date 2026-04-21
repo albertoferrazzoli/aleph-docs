@@ -434,6 +434,35 @@ async def upsert_media_chunk(
             f"(e.g. 'gemini-2-preview')."
         )
 
+    # Early dedup short-circuit: check if a row with this media_ref
+    # already exists BEFORE paying the embed cost. For the md-image
+    # rebuild case this avoids 150+ Nomic HTTP calls per workspace
+    # switch — and gets rid of the UPDATE+notify spam the viewer
+    # renders as "reinforce" badges.
+    if chunk.media_ref:
+        async with db.get_conn() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT id, metadata->>'source_sha256' "
+                    "FROM memories "
+                    "WHERE kind = %s AND media_ref = %s "
+                    "LIMIT 1",
+                    (chunk.kind, chunk.media_ref),
+                )
+                pre = await cur.fetchone()
+        if pre is not None:
+            pre_id, pre_sha = pre
+            # Sha match OR caller didn't provide a sha (md-image path):
+            # row is considered unchanged, skip embed + any write.
+            if (source_sha256 and pre_sha == source_sha256) or not source_sha256:
+                return {
+                    "id": str(pre_id),
+                    "kind": chunk.kind,
+                    "media_type": chunk.media_type,
+                    "deduplicated": True,
+                }
+            # Sha mismatch → we'll embed and UPDATE below (Case C).
+
     # Text-embedded kinds (*_transcript) pass the transcript string to
     # the embedder; media kinds pass the file path so the backend reads
     # bytes itself.
@@ -495,21 +524,30 @@ async def upsert_media_chunk(
                 existing = await cur.fetchone()
                 if existing is not None:
                     existing_id, existing_sha = existing
+                    # Case A: explicit sha match → no-op.
                     if source_sha256 and existing_sha == source_sha256:
-                        # Same file, same content — no-op, return the
-                        # existing row. We intentionally skip the
-                        # embed cost too (caller has already paid it
-                        # via embeddings.embed_batch above, but the
-                        # row stays unique).
                         return {
                             "id": str(existing_id),
                             "kind": chunk.kind,
                             "media_type": chunk.media_type,
                             "deduplicated": True,
                         }
-                    # Different hash (or no hash to compare): update the
-                    # existing row in place with the fresh embedding +
-                    # content + metadata. No new row.
+                    # Case B: caller didn't provide a sha at all (e.g. the
+                    # markdown indexer re-walking img refs on every
+                    # workspace switch). We have no evidence the file
+                    # changed — don't UPDATE the row or it'll fire a
+                    # memory_change notify that the viewer renders as
+                    # a "reinforce" badge on every switch.
+                    if not source_sha256:
+                        return {
+                            "id": str(existing_id),
+                            "kind": chunk.kind,
+                            "media_type": chunk.media_type,
+                            "deduplicated": True,
+                        }
+                    # Case C: explicit sha that DIFFERS from the stored
+                    # one → file genuinely changed, update the row in
+                    # place with the fresh embedding + content + meta.
                     await cur.execute(
                         "UPDATE memories SET "
                         "  content = %s, source_path = %s, "

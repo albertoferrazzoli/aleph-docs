@@ -520,10 +520,26 @@ async def _flush_memory(pending, pending_images=None):
                             try:
                                 caption = alt or abs_img.stem
                                 chunk = chunk_image(abs_img, caption=caption)
+                                # Pass through source_sha256 + source_mtime so
+                                # (a) upsert_media_chunk's dedup can match on
+                                #     sha in the fast path, and
+                                # (b) the reconciler's next mtime comparison
+                                #     finds the row pre-populated — otherwise
+                                #     every reconcile sweep would mark these
+                                #     files to_update and churn delete/insert
+                                #     against the DB on every run.
+                                try:
+                                    _img_stat = abs_img.stat()
+                                    _img_mtime = int(_img_stat.st_mtime)
+                                except OSError:
+                                    _img_mtime = None
                                 await store.upsert_media_chunk(
                                     chunk,
                                     actor="indexer:md-image",
                                     context=f"from {rel_md}",
+                                    source_path=str(abs_img.resolve()),
+                                    source_sha256=(chunk.metadata or {}).get("sha256"),
+                                    source_mtime=_img_mtime,
                                 )
                             except Exception as e:
                                 logging.getLogger("memory").warning(
