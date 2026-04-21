@@ -14,6 +14,7 @@ store has persisted the rows).
 from __future__ import annotations
 
 import logging
+import os
 import tempfile
 from contextlib import ExitStack
 from pathlib import Path
@@ -91,29 +92,19 @@ def chunk_pdf(path: Path, stack: ExitStack | None = None) -> list[MediaChunk]:
             stack.close()
         raise RuntimeError(f"chunk_pdf: pypdfium2 failed to open {path}: {e}") from e
 
+    # Zero-cost text-only mode: skip page rendering + embedded-image
+    # extraction entirely, emit one pdf_text chunk per page with the
+    # extracted text as content. Embedding is done as text by the
+    # store, so works with any backend including local Ollama.
+    hybrid = os.environ.get("HYBRID_MEDIA_EMBEDDING", "true").strip().lower() == "true"
+
     chunks: list[MediaChunk] = []
     try:
         total = len(pdf)
         for i in range(total):
-            page = pdf[i]
-            # Render page to PNG at 150 DPI.
-            try:
-                bitmap = page.render(scale=_RENDER_SCALE)
-                pil_image = bitmap.to_pil()
-            finally:
-                page.close()
-
-            png_path = tmpdir / f"page-{i + 1:04d}.png"
-            pil_image.save(png_path, format="PNG", optimize=True)
-
-            # Thumbnail.
-            preview = media.make_image_thumbnail(png_path)
-
-            # Text extraction (best-effort; empty for image-only PDFs).
+            # ---- Text extraction (needed in both modes) ----
             text = ""
             try:
-                # Re-open a fresh page for text extraction — pypdfium2 closes
-                # its text page automatically with the page handle.
                 tp = pdf[i]
                 try:
                     text_page = tp.get_textpage()
@@ -126,8 +117,47 @@ def chunk_pdf(path: Path, stack: ExitStack | None = None) -> list[MediaChunk]:
             except Exception as e:  # pragma: no cover
                 logger.debug("chunk_pdf: text extraction failed for %s p%d: %s",
                              path.name, i + 1, e)
-
             text = (text or "").strip()
+
+            # ---- Text-only branch (HYBRID_MEDIA_EMBEDDING=false) ----
+            # Emit one pdf_text chunk per page; skip rendering and
+            # embedded-image extraction entirely. Stops here for this page.
+            if not hybrid:
+                if not text:
+                    # Empty page (e.g. a scanned PDF with no OCR layer).
+                    # Skip — we have nothing to embed as text, and the
+                    # user explicitly opted out of image embedding.
+                    continue
+                chunks.append(MediaChunk(
+                    kind="pdf_text",
+                    content=text,
+                    media_ref=f"{abs_path}#page={i + 1}",
+                    media_type="text/plain",
+                    preview_b64=None,
+                    metadata={
+                        "sha256_src": sha256,
+                        "page": i + 1,
+                        "total_pages": total,
+                        "text_chars": len(text),
+                    },
+                    path=None,
+                ))
+                continue
+
+            # ---- Hybrid branch (default): render + image embed ----
+            page = pdf[i]
+            try:
+                bitmap = page.render(scale=_RENDER_SCALE)
+                pil_image = bitmap.to_pil()
+            finally:
+                page.close()
+
+            png_path = tmpdir / f"page-{i + 1:04d}.png"
+            pil_image.save(png_path, format="PNG", optimize=True)
+
+            # Thumbnail.
+            preview = media.make_image_thumbnail(png_path)
+
             snippet = text[:_PREVIEW_TEXT_CHARS] if text else stem
 
             chunks.append(MediaChunk(

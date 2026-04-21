@@ -23,6 +23,7 @@ export const KIND_SWATCH = {
   pdf_page:         '#f97316',   // orange
   video_transcript: '#fca5a5',   // lighter coral — paired with video_scene
   audio_transcript: '#c4b5fd',   // lighter violet — paired with audio_clip
+  pdf_text:         '#fdba74',   // lighter orange — paired with pdf_page
 };
 export const KIND_LABELS = {
   doc_chunk:        'doc chunk',
@@ -34,11 +35,13 @@ export const KIND_LABELS = {
   pdf_page:         'pdf page',
   video_transcript: 'video transcript',
   audio_transcript: 'audio transcript',
+  pdf_text:         'pdf text',
 };
 export const KINDS_ORDER = [
   'doc_chunk', 'interaction', 'insight',
   'image', 'video_scene', 'video_transcript',
-  'audio_clip', 'audio_transcript', 'pdf_page',
+  'audio_clip', 'audio_transcript',
+  'pdf_page', 'pdf_text',
 ];
 
 // Groups for the sidebar filter. Lives here (not in App.jsx) because
@@ -46,7 +49,7 @@ export const KINDS_ORDER = [
 export const KIND_GROUPS = [
   { title: 'text',        kinds: ['doc_chunk', 'insight', 'interaction'] },
   { title: 'media',       kinds: ['image', 'video_scene', 'audio_clip', 'pdf_page'] },
-  { title: 'transcripts', kinds: ['video_transcript', 'audio_transcript'] },
+  { title: 'transcripts', kinds: ['video_transcript', 'audio_transcript', 'pdf_text'] },
 ];
 
 const kindLabel = (k) => KIND_LABELS[k] || k;
@@ -88,6 +91,7 @@ export function TopBar({ onQuery, query, setQuery, stats, liveEvents, onOpenSett
         <Stat label="aud" value={stats.audio_clip} dotColor={KIND_SWATCH.audio_clip} />
         <Stat label="atx" value={stats.audio_transcript} dotColor={KIND_SWATCH.audio_transcript} />
         <Stat label="pdf" value={stats.pdf_page} dotColor={KIND_SWATCH.pdf_page} />
+        <Stat label="ptx" value={stats.pdf_text} dotColor={KIND_SWATCH.pdf_text} />
         <div className="live-badge">
           <span className={'live-dot ' + (liveEvents ? 'on' : 'off')} />
           <span>stream</span>

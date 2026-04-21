@@ -256,18 +256,25 @@ async def _reconcile_local(
 
     # 2) Adds and updates share the embed/upsert path. Skip if backend
     #    cannot handle media at all — surface as errors so /health is loud.
-    ok, backend_name, mods = _backend_supports_any_media()
-    if (to_add or to_update) and not ok:
-        msg = (
-            f"embedder backend {backend_name!r} has no media modalities "
-            f"({mods or 'none'}); cannot ingest "
-            f"{len(to_add) + len(to_update)} media file(s). "
-            "Set EMBED_BACKEND=gemini-2-preview."
-        )
-        log.warning("[reconcile] %s", msg)
-        summary.errors.append(msg)
-        summary.finished_at = time.time()
-        return summary
+    # Only gate on media modalities when HYBRID_MEDIA_EMBEDDING is on.
+    # In text-only mode we produce only transcript/pdf_text chunks that
+    # embed via text — any backend with a text modality (including local
+    # Ollama) works fine.
+    hybrid = os.environ.get("HYBRID_MEDIA_EMBEDDING", "true").strip().lower() == "true"
+    if hybrid:
+        ok, backend_name, mods = _backend_supports_any_media()
+        if (to_add or to_update) and not ok:
+            msg = (
+                f"embedder backend {backend_name!r} has no media modalities "
+                f"({mods or 'none'}); cannot ingest "
+                f"{len(to_add) + len(to_update)} media file(s). "
+                "Set EMBED_BACKEND=gemini-2-preview "
+                "or HYBRID_MEDIA_EMBEDDING=false for a text-only pipeline."
+            )
+            log.warning("[reconcile] %s", msg)
+            summary.errors.append(msg)
+            summary.finished_at = time.time()
+            return summary
 
     done = 0
 

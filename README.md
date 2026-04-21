@@ -634,6 +634,58 @@ Set `ASR_ENABLED=false`. The chunker then emits the legacy
 produces no `video_transcript` rows — identical to the
 pre-transcription behaviour.
 
+### Fully zero-cost ingest — `HYBRID_MEDIA_EMBEDDING=false`
+
+The hybrid pipeline produces **two** rows per scene/clip/page:
+a media-embedded row (expensive with Gemini multimodal) and a paired
+text-embedded row (transcript / extracted page text — trivial cost).
+For a corpus you only query with text ("what does the instructor say
+about X?", "which page covers Y?"), the media side is pure
+unnecessary spend.
+
+Set `HYBRID_MEDIA_EMBEDDING=false` and the chunkers skip the media
+rows entirely:
+
+| Source file | With HYBRID=true | With HYBRID=false |
+|---|---|---|
+| video `.mp4` / `.mov` | `video_scene` + `video_transcript` | `video_transcript` only |
+| audio `.mp3` / `.wav` | `audio_clip` + `audio_transcript` | `audio_transcript` only |
+| PDF `.pdf` | `pdf_page` (image) + embedded `image` rows | `pdf_text` (extracted text per page) |
+| standalone image `.png`/`.jpg` | `image` | **skipped** (no text to embed) |
+| markdown `.md`/`.mdx` | `doc_chunk` | `doc_chunk` (unchanged) |
+
+Because every surviving chunk is text-embedded, you can combine this
+with any text-only backend — including `EMBED_BACKEND=local`
+(Ollama + `bge-m3`) — for a **$0 recurring cost** pipeline where
+Whisper transcribes video/audio locally and Ollama embeds locally.
+A 30 h course + a few hundred PDF pages ingests in a few hours, total
+spend zero.
+
+Re-enable HYBRID later by `docker compose down -v` + flipping the
+flag + `up` — the schema dim reset (see below) is the only friction.
+
+### ⚠️ Switching `EMBED_BACKEND` resets the pgvector schema
+
+pgvector columns are typed as `vector(N)` where `N` is fixed at
+`CREATE TABLE` time. Different backends produce different dims:
+
+| Backend | `EMBED_DIM` |
+|---|---|
+| `gemini-001`, `gemini-2-preview` | 1536 |
+| `local` + `bge-m3` | 1024 |
+| `local` + `nomic-embed-text` | 768 |
+
+Changing the backend therefore requires a schema rebuild. The db
+container's `init-memory.sh` wrapper reads `EMBED_DIM` from the
+environment at first-boot and renders the schema with the right dim;
+**the init script only runs on an empty data directory**. To switch:
+
+```bash
+docker compose down -v     # drop db_data + mcp_data
+# edit .env: flip EMBED_BACKEND, EMBED_DIM, LOCAL_EMBED_DIM, HYBRID_MEDIA_EMBEDDING
+docker compose up -d --build
+```
+
 ---
 
 ## Quick start with Docker (2 minutes)

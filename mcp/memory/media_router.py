@@ -60,6 +60,18 @@ async def route_media(
         )
 
     if modality == "image":
+        # In text-only (HYBRID_MEDIA_EMBEDDING=false) mode we have no
+        # text fallback for standalone images, so skip them entirely
+        # rather than spam the reconciler with backend-modality errors.
+        import os as _os
+        hybrid = _os.environ.get("HYBRID_MEDIA_EMBEDDING", "true").strip().lower() == "true"
+        if not hybrid:
+            import logging as _logging
+            _logging.getLogger("memory.media_router").info(
+                "[media_router] skipping image %s: HYBRID_MEDIA_EMBEDDING=false",
+                path.name,
+            )
+            return []
         from .chunker_image import chunk_image
         return [chunk_image(path, caption=caption)]
 

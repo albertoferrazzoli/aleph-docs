@@ -24,6 +24,9 @@ _MEDIA_KINDS = frozenset({
     # visual / audio row. Queryable via semantic_search with
     # kind="video_transcript" / "audio_transcript".
     "video_transcript", "audio_transcript",
+    # Text-only PDF kind: emitted when HYBRID_MEDIA_EMBEDDING=false
+    # so the corpus works with a text-only embedder backend.
+    "pdf_text",
 })
 _ALL_KINDS = frozenset({"doc_chunk", "interaction", "insight"}) | _MEDIA_KINDS
 

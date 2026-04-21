@@ -365,11 +365,14 @@ _KIND_TO_MODALITY = {
     "pdf_page": "pdf",
     "video_transcript": "text",
     "audio_transcript": "text",
+    "pdf_text": "text",
 }
 
 # Kinds that embed `chunk.content` (a transcript string) instead of
 # `chunk.path` (a media file). The path field is expected to be None.
-_TEXT_EMBEDDING_KINDS = frozenset({"video_transcript", "audio_transcript"})
+_TEXT_EMBEDDING_KINDS = frozenset({
+    "video_transcript", "audio_transcript", "pdf_text",
+})
 
 
 async def upsert_media_chunk(

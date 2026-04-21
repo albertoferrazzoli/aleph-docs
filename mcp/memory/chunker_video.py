@@ -118,6 +118,11 @@ async def chunk_video(
     chunks: list[MediaChunk] = []
     resolved_src = str(path.resolve())
     asr_lang = os.environ.get("ASR_LANGUAGE", "").strip() or None
+    # When false (zero-cost text-only mode), skip the expensive
+    # video_scene row. The scene .mp4 segment is still produced so
+    # Whisper can transcribe it — we just never send it to the
+    # multimodal embedder.
+    hybrid = os.environ.get("HYBRID_MEDIA_EMBEDDING", "true").strip().lower() == "true"
 
     for i, (t_start, t_end) in enumerate(bounds):
         seg_path = out_dir / f"scene_{i:04d}{path.suffix.lower()}"
@@ -165,15 +170,16 @@ async def chunk_video(
         if transcript:
             meta["has_transcript"] = True
 
-        chunks.append(MediaChunk(
-            kind="video_scene",
-            content=content,
-            media_ref=f"{resolved_src}#t={t_start:.2f}",
-            media_type=mime,
-            preview_b64=thumb,
-            metadata=meta,
-            path=seg_path,
-        ))
+        if hybrid:
+            chunks.append(MediaChunk(
+                kind="video_scene",
+                content=content,
+                media_ref=f"{resolved_src}#t={t_start:.2f}",
+                media_type=mime,
+                preview_b64=thumb,
+                metadata=meta,
+                path=seg_path,
+            ))
 
         # Paired text-embedded row — only when ASR actually produced
         # text. It shares source_path + media_ref + thumbnail with the
@@ -217,15 +223,16 @@ async def chunk_video(
         }
         if fallback_transcript:
             fallback_meta["has_transcript"] = True
-        chunks.append(MediaChunk(
-            kind="video_scene",
-            content=content,
-            media_ref=f"{resolved_src}#t=0.00",
-            media_type=mime,
-            preview_b64=None,
-            metadata=fallback_meta,
-            path=seg_path,
-        ))
+        if hybrid:
+            chunks.append(MediaChunk(
+                kind="video_scene",
+                content=content,
+                media_ref=f"{resolved_src}#t=0.00",
+                media_type=mime,
+                preview_b64=None,
+                metadata=fallback_meta,
+                path=seg_path,
+            ))
         if fallback_transcript:
             chunks.append(MediaChunk(
                 kind="video_transcript",

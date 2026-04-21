@@ -52,6 +52,11 @@ ALTER TYPE memory_kind ADD VALUE IF NOT EXISTS 'pdf_page';
 -- continue to work unchanged.
 ALTER TYPE memory_kind ADD VALUE IF NOT EXISTS 'video_transcript';
 ALTER TYPE memory_kind ADD VALUE IF NOT EXISTS 'audio_transcript';
+-- Text-only pdf kind: holds the extracted page text as content and
+-- embeds it as text. Emitted when HYBRID_MEDIA_EMBEDDING=false (the
+-- "zero-cost, text-only" ingest mode where the backend may be a
+-- text-only embedder like Ollama).
+ALTER TYPE memory_kind ADD VALUE IF NOT EXISTS 'pdf_text';
 
 CREATE UNIQUE INDEX IF NOT EXISTS memories_doc_chunk_uniq
     ON memories(source_path, source_section)

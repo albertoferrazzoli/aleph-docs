@@ -88,6 +88,8 @@ async def chunk_audio(
     n = len(segments)
     resolved_src = str(path.resolve())
     asr_lang = os.environ.get("ASR_LANGUAGE", "").strip() or None
+    # Zero-cost text-only mode: keep only the audio_transcript row.
+    hybrid = os.environ.get("HYBRID_MEDIA_EMBEDDING", "true").strip().lower() == "true"
 
     chunks: list[MediaChunk] = []
     for i, (t_start, t_end, seg_path) in enumerate(segments):
@@ -117,15 +119,16 @@ async def chunk_audio(
         if seg_transcript:
             meta["has_transcript"] = True
 
-        chunks.append(MediaChunk(
-            kind="audio_clip",
-            content=content,
-            media_ref=f"{resolved_src}#t={t_start:.2f},{t_end:.2f}",
-            media_type=mime,
-            preview_b64=None,  # v1: no waveform thumbnail; viewer renders on demand.
-            metadata=meta,
-            path=seg_path,
-        ))
+        if hybrid:
+            chunks.append(MediaChunk(
+                kind="audio_clip",
+                content=content,
+                media_ref=f"{resolved_src}#t={t_start:.2f},{t_end:.2f}",
+                media_type=mime,
+                preview_b64=None,  # v1: no waveform thumbnail; viewer renders on demand.
+                metadata=meta,
+                path=seg_path,
+            ))
 
         if seg_transcript:
             chunks.append(MediaChunk(

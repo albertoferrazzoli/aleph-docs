@@ -15,6 +15,7 @@ const KIND_COLOR = {
   pdf_page:         new THREE.Color('#f97316'),  // orange
   video_transcript: new THREE.Color('#fca5a5'),  // lighter coral — paired with video_scene
   audio_transcript: new THREE.Color('#c4b5fd'),  // lighter violet — paired with audio_clip
+  pdf_text:         new THREE.Color('#fdba74'),  // lighter orange — paired with pdf_page
 };
 const DEFAULT_KIND = new THREE.Color('#94a3b8');
 

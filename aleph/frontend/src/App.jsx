@@ -65,7 +65,8 @@ const FILTERS_DEFAULT = {
   kinds: new Set([
     'doc_chunk', 'interaction', 'insight',
     'image', 'video_scene', 'video_transcript',
-    'audio_clip', 'audio_transcript', 'pdf_page',
+    'audio_clip', 'audio_transcript',
+    'pdf_page', 'pdf_text',
   ]),
   minScore: 0.05,
 };
@@ -404,7 +405,7 @@ export default function App() {
     const s = {
       total: 0, doc: 0, interaction: 0, insight: 0,
       image: 0, video_scene: 0, audio_clip: 0, pdf_page: 0,
-      video_transcript: 0, audio_transcript: 0,
+      video_transcript: 0, audio_transcript: 0, pdf_text: 0,
     };
     for (const n of nodes) {
       if ((n.decay ?? 1) === 0) continue;
@@ -418,6 +419,7 @@ export default function App() {
       else if (n.kind === 'audio_clip') s.audio_clip++;
       else if (n.kind === 'audio_transcript') s.audio_transcript++;
       else if (n.kind === 'pdf_page') s.pdf_page++;
+      else if (n.kind === 'pdf_text') s.pdf_text++;
     }
     return s;
   }, [nodes]);

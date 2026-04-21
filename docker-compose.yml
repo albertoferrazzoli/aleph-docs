@@ -25,12 +25,19 @@ services:
       POSTGRES_DB: ${PG_DB:-aleph_memory}
       POSTGRES_USER: ${PG_USER:-aleph}
       POSTGRES_PASSWORD: ${PG_PASSWORD:-aleph_dev_password_change_me}
+      # The schema init script reads EMBED_DIM to size the pgvector
+      # column. Must match EMBED_DIM on the mcp/aleph services.
+      EMBED_DIM: ${EMBED_DIM:-1536}
     volumes:
       - db_data:/var/lib/postgresql/data
       # Init scripts run in lexical order. 01 = extensions + grants,
-      # 02 = MCP memory schema, 03 = Aleph graph_snapshot + triggers.
+      # 02 = MCP memory schema (via wrapper that sed-renders the
+      # vector(N) dim from EMBED_DIM), 03 = Aleph graph_snapshot,
+      # 04 = NOTIFY triggers. The schema.sql itself is mounted
+      # OUTSIDE initdb.d as a template so the wrapper reads it.
       - ./docker/init-db.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
-      - ./mcp/memory/schema.sql:/docker-entrypoint-initdb.d/02-memory.sql:ro
+      - ./docker/init-memory.sh:/docker-entrypoint-initdb.d/02-memory.sh:ro
+      - ./mcp/memory/schema.sql:/var/lib/aleph/schema-memory.sql:ro
       - ./aleph/backend/schema_additions.sql:/docker-entrypoint-initdb.d/03-aleph.sql:ro
       - ./aleph/backend/triggers.sql:/docker-entrypoint-initdb.d/04-triggers.sql:ro
     healthcheck:
@@ -75,6 +82,13 @@ services:
       # Reconciler: set false to skip the boot-time media scan and rely
       # only on the watcher (local mode) or on-demand reindex_docs().
       INGEST_MEDIA_ON_BOOT: ${INGEST_MEDIA_ON_BOOT:-true}
+      # Hybrid media embedding: when true (default), video scenes are
+      # embedded as video AND the Whisper transcript is embedded as text
+      # (paired rows). When false, only text-embedded chunks are created
+      # (video_transcript, audio_transcript, pdf_text) — no Gemini spend
+      # on video/image modalities. Set false for a zero-cost text-only
+      # pipeline with EMBED_BACKEND=local (Ollama).
+      HYBRID_MEDIA_EMBEDDING: ${HYBRID_MEDIA_EMBEDDING:-true}
       # ASR backend selection — one of whisper_local (default, free),
       # openai ($0.006/min), gemini (~$0.01/min). See README.
       ASR_BACKEND: ${ASR_BACKEND:-whisper_local}
