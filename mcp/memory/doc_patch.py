@@ -374,6 +374,112 @@ def apply_patch(topic: str,
         return PatchResult(status="error", error=f"{type(e).__name__}: {e}")
 
 
+def create_new_file_patch(topic: str,
+                          new_rel_path: str,
+                          new_title: str,
+                          prose: str,
+                          commit_message_subject: str,
+                          commit_message_body: str,
+                          dry_run: bool = False,
+                          branch_prefix: str = "docs/mcp-new-") -> PatchResult:
+    """Create a new markdown file in the docs repo from scratch.
+
+    Used when suggest_doc_update reports low target_confidence and the
+    caller opts to create a new page rather than graft the prose onto a
+    weakly-related existing page. The new file gets an H1 from
+    `new_title` and the caller-provided prose below it.
+
+    Refuses if the target file already exists (use `apply_patch` instead).
+    """
+    try:
+        repo = _get_repo_path()
+        if not repo.exists():
+            return PatchResult(status="error", error=f"repo not found: {repo}")
+
+        content_subdir = _get_content_subdir()
+        # new_rel_path is relative to <repo>/<content_subdir>/ for
+        # consistency with apply_patch / insert_into_file inputs.
+        abs_path = (repo / content_subdir / new_rel_path).resolve()
+        try:
+            abs_path.relative_to((repo / content_subdir).resolve())
+        except ValueError:
+            return PatchResult(
+                status="error",
+                error=f"new_rel_path escapes content root: {new_rel_path}",
+            )
+
+        if abs_path.exists():
+            return PatchResult(
+                status="error",
+                error=f"target file already exists: {new_rel_path} — "
+                      "use apply_patch to extend it instead.",
+            )
+
+        stamp = datetime.utcnow().strftime("%Y%m%d-%H%M")
+        base_branch = f"{branch_prefix}{slugify(topic)}-{stamp}"
+        body = f"# {new_title.strip()}\n\n{prose.rstrip()}\n"
+
+        if dry_run:
+            return PatchResult(
+                status="dry_run",
+                branch=base_branch,
+                target_path=new_rel_path,
+                commit_message=commit_message_subject,
+                diff_preview=body[:2000],
+            )
+
+        try:
+            ensure_clean_repo(repo)
+        except RuntimeError as e:
+            return PatchResult(status="error", error=str(e))
+
+        try:
+            checkout_main(repo)
+        except RuntimeError as e:
+            return PatchResult(status="error",
+                               error=f"could not checkout main: {e}")
+
+        branch = unique_branch_name(repo, base_branch)
+        try:
+            create_branch(repo, branch)
+        except RuntimeError as e:
+            return PatchResult(status="error",
+                               error=f"branch creation failed: {e}")
+
+        try:
+            abs_path.parent.mkdir(parents=True, exist_ok=True)
+            abs_path.write_text(body, encoding="utf-8")
+            log.info("doc_patch: created new file %s (%d bytes)",
+                     new_rel_path, len(body))
+        except Exception as e:
+            _git(["checkout", "main"], repo, check=False)
+            _git(["branch", "-D", branch], repo, check=False)
+            return PatchResult(status="error",
+                               error=f"could not write file: {e}")
+
+        try:
+            sha, diff_preview = commit_and_return(
+                repo, commit_message_subject, commit_message_body
+            )
+        except RuntimeError as e:
+            _git(["checkout", "main"], repo, check=False)
+            _git(["branch", "-D", branch], repo, check=False)
+            return PatchResult(status="error",
+                               error=f"commit failed: {e}")
+
+        return PatchResult(
+            status="committed",
+            branch=branch,
+            commit_sha=sha,
+            commit_message=commit_message_subject,
+            diff_preview=diff_preview,
+            target_path=new_rel_path,
+        )
+    except Exception as e:  # pragma: no cover - defensive
+        log.exception("create_new_file_patch unexpected error")
+        return PatchResult(status="error", error=f"{type(e).__name__}: {e}")
+
+
 # ---------------------------------------------------------------------------
 # GitHub push + PR (optional, gated by DOCS_WRITE_TOKEN env var)
 # ---------------------------------------------------------------------------

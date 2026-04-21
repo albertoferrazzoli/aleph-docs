@@ -3,6 +3,7 @@
 import base64
 import logging
 import os
+import re
 
 from pathlib import Path
 
@@ -21,6 +22,21 @@ log = logging.getLogger("memory")
 
 _MEDIA_KINDS = frozenset({"image", "pdf_page", "video_scene", "audio_clip"})
 _ALL_KINDS = frozenset({"doc_chunk", "interaction", "insight"}) | _MEDIA_KINDS
+
+
+def _slug_for_new_file(text: str, max_len: int = 60) -> str:
+    """Lowercase ASCII slug suitable for a filesystem path. Collapses
+    non-alphanumerics into single hyphens; caps length so the file name
+    stays readable."""
+    slug = re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")
+    return slug[:max_len].rstrip("-") or "untitled"
+
+
+def _title_from_topic(text: str) -> str:
+    """Cleaned topic string suitable as H1. Keeps original casing but
+    trims whitespace and drops trailing punctuation."""
+    t = text.strip().rstrip(".!?,;:")
+    return t or "Untitled"
 
 
 # Extension → (modality label, lazy chunker). Only images are wired in
@@ -628,6 +644,39 @@ def register(mcp):
                 "git commit."
             )
 
+            # Fallback: when no existing page scores high enough, propose
+            # creating a new page rather than grafting prose onto a weakly-
+            # related target. The caller (LLM) decides whether to accept the
+            # proposal or override with an explicit target.
+            fallback_proposal = None
+            LOW_TARGET_CONFIDENCE = 0.6
+            if target_confidence < LOW_TARGET_CONFIDENCE:
+                topic_slug = _slug_for_new_file(topic)
+                parent_dir = ""
+                if target_path:
+                    parent_dir = "/".join(target_path.split("/")[:-1])
+                suggested_new_path = (
+                    f"{parent_dir}/{topic_slug}.md" if parent_dir
+                    else f"{topic_slug}.md"
+                )
+                suggested_title = _title_from_topic(topic)
+                fallback_proposal = {
+                    "type": "new_page",
+                    "suggested_path": suggested_new_path,
+                    "suggested_title": suggested_title,
+                    "rationale": (
+                        f"No existing page covers the topic closely: the "
+                        f"strongest chunk match is {target_confidence:.2f} "
+                        f"(threshold {LOW_TARGET_CONFIDENCE}). Consider "
+                        "creating a new page via "
+                        "`propose_doc_patch(create_new_file=True, "
+                        "new_path=..., new_title=..., prose=...)` instead "
+                        "of grafting prose onto the weak candidate. You "
+                        "may override `suggested_path` if the project's "
+                        "conventions place this material elsewhere."
+                    ),
+                }
+
             return {
                 "topic": topic,
                 "target_path": target_path,
@@ -636,6 +685,7 @@ def register(mcp):
                 "supporting_notes": supporting_notes,
                 "confidence": round(confidence, 3),
                 "instructions_for_writer": instructions_for_writer,
+                "fallback_proposal": fallback_proposal,
             }
         except db.MemoryDisabled:
             return {"error": "semantic memory is disabled"}
@@ -646,26 +696,39 @@ def register(mcp):
     async def propose_doc_patch(topic: str, prose: str = "",
                                 target_path: str = "",
                                 target_section: str = "",
+                                create_new_file: bool = False,
+                                new_path: str = "",
+                                new_title: str = "",
                                 top_k: int = 8,
                                 dry_run: bool = False,
                                 open_pr: bool = False) -> dict:
-        """Create a git branch + commit in the docs repo with a user-authored
-        extension to an existing page.
+        """Create a git branch + commit in the docs repo with caller-authored
+        prose: either as an extension to an existing page OR as a brand new
+        page when no existing target is a good fit.
 
         Typical flow:
           1. Call `suggest_doc_update(topic=...)` to fetch the target page,
-             the matching section, and the supporting notes.
-          2. You (the caller) write ONE discursive paragraph in the voice of
-             the existing documentation, following the `instructions_for_writer`
-             returned by step 1.
-          3. Call `propose_doc_patch(topic=..., prose=<your paragraph>)`.
+             the matching section, the supporting notes, and — when target
+             confidence is low — a `fallback_proposal` suggesting a new page.
+          2. You (the caller) write ONE discursive prose block in the voice
+             of the existing documentation, following the
+             `instructions_for_writer` returned by step 1.
+          3a. To extend an existing page:
+                propose_doc_patch(topic=..., prose=<your paragraph>)
+          3b. To create a new page (fallback_proposal accepted or overridden):
+                propose_doc_patch(topic=..., prose=...,
+                                  create_new_file=True,
+                                  new_path=<rel/path.md>,
+                                  new_title=<H1 title>)
 
-        `prose` is inserted verbatim immediately after the target H2 section
-        (or at EOF if none). The tool does NOT add a heading, a bullet list,
-        or any metadata — what you pass is exactly what gets committed.
-        `target_path` and `target_section` are optional overrides; when
-        omitted the tool re-runs the retrieval from `suggest_doc_update` and
-        uses its best guess.
+        For extension mode, `prose` is inserted verbatim immediately after
+        the target H2 section (or at EOF if none). For new-file mode, the
+        tool writes `# <new_title>\\n\\n<prose>` to `<content_root>/<new_path>`
+        and refuses if the file already exists.
+
+        The tool never adds bullet lists, headings beyond the H1 in new-file
+        mode, or internal metadata — what you pass is exactly what gets
+        committed.
 
         If `prose` is empty, the tool returns `status: "needs_prose"` with
         the same material as `suggest_doc_update` so the caller can draft it
@@ -675,18 +738,99 @@ def register(mcp):
             topic: Topic identifier used for branch/commit naming.
             prose: Markdown paragraph(s) authored by the caller. Required
                 for an actual commit.
-            target_path: Override target doc path (relative to repo).
+            target_path: Override target doc path (relative to content root).
+                Ignored when `create_new_file=True`.
             target_section: Override H2 section name to insert after.
+                Ignored when `create_new_file=True`.
+            create_new_file: When True, write `prose` as a new markdown file
+                at `new_path` with `new_title` as the H1. Fails if the file
+                already exists.
+            new_path: Relative path (under content root) of the new file.
+                Required when `create_new_file=True`.
+            new_title: H1 title for the new file. Required when
+                `create_new_file=True`.
             top_k: How many supporting memories to consider when deriving
                 defaults for `target_path` / `target_section` (default 8).
             dry_run: If true, compute the plan but don't touch the repo.
             open_pr: If true, after committing also push the branch and
                 open a PR.
         """
-        from memory.doc_patch import apply_patch, push_branch, open_pull_request, _get_repo_path
+        from memory.doc_patch import (
+            apply_patch, create_new_file_patch,
+            push_branch, open_pull_request, _get_repo_path,
+        )
 
         try:
             top_k = max(1, min(int(top_k), 20))
+
+            # New-file branch: skip target resolution entirely, go straight
+            # to create_new_file_patch after validating args.
+            if create_new_file:
+                if not prose.strip():
+                    return {
+                        "status": "needs_prose",
+                        "topic": topic,
+                        "mode": "new_file",
+                        "message": (
+                            "create_new_file=True requires `prose`. Call "
+                            "suggest_doc_update first, accept or override "
+                            "its `fallback_proposal`, draft the prose, "
+                            "then re-invoke with prose + new_path + new_title."
+                        ),
+                    }
+                if not new_path:
+                    return {
+                        "status": "error",
+                        "topic": topic,
+                        "message": "create_new_file=True requires `new_path`",
+                    }
+                if not new_title:
+                    return {
+                        "status": "error",
+                        "topic": topic,
+                        "message": "create_new_file=True requires `new_title`",
+                    }
+                commit_subject = f"docs: create {new_path} ({topic})"
+                commit_body = (
+                    f"Topic: {topic}\n"
+                    f"New file: {new_path}\n"
+                    f"Title: {new_title}\n"
+                    f"\n"
+                    f"Page authored by the caller via propose_doc_patch."
+                )
+                result = create_new_file_patch(
+                    topic=topic,
+                    new_rel_path=new_path,
+                    new_title=new_title,
+                    prose=prose,
+                    commit_message_subject=commit_subject,
+                    commit_message_body=commit_body,
+                    dry_run=bool(dry_run),
+                )
+                out = result.to_dict()
+                out.update({
+                    "topic": topic,
+                    "mode": "new_file",
+                    "new_path": new_path,
+                    "new_title": new_title,
+                })
+                if open_pr and result.status == "committed" and result.branch:
+                    try:
+                        repo_path = _get_repo_path()
+                        push_branch(repo_path, result.branch)
+                        out["pushed"] = True
+                        pr_body = (
+                            f"New page proposed by MCP.\n\n{commit_body}"
+                        )
+                        out["pr_url"] = open_pull_request(
+                            branch=result.branch,
+                            title=commit_subject,
+                            body=pr_body,
+                        )
+                        out["next_steps"] = f"Review the PR at {out['pr_url']}"
+                    except Exception as e:
+                        log.warning("[memory] open_pr failed: %s", e)
+                return out
 
             # Resolve target via suggest_doc_update's logic when not overridden.
             supporting: list[dict] = []
