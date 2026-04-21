@@ -14,26 +14,31 @@ function fmtDaysAgo(ts) {
 // Seven memory kinds — keep in sync with mcp/memory/schema.sql and
 // aleph/frontend/src/Scene.jsx KIND_COLOR.
 export const KIND_SWATCH = {
-  doc_chunk:   '#7dd3fc',   // sky blue
-  interaction: '#fbbf24',   // amber
-  insight:     '#f472b6',   // pink
-  image:       '#4ade80',   // green
-  video_scene: '#fb7185',   // coral
-  audio_clip:  '#a78bfa',   // violet
-  pdf_page:    '#f97316',   // orange
+  doc_chunk:        '#7dd3fc',   // sky blue
+  interaction:      '#fbbf24',   // amber
+  insight:          '#f472b6',   // pink
+  image:            '#4ade80',   // green
+  video_scene:      '#fb7185',   // coral
+  audio_clip:       '#a78bfa',   // violet
+  pdf_page:         '#f97316',   // orange
+  video_transcript: '#fca5a5',   // lighter coral — paired with video_scene
+  audio_transcript: '#c4b5fd',   // lighter violet — paired with audio_clip
 };
 export const KIND_LABELS = {
-  doc_chunk:   'doc chunk',
-  interaction: 'interaction',
-  insight:     'insight',
-  image:       'image',
-  video_scene: 'video scene',
-  audio_clip:  'audio clip',
-  pdf_page:    'pdf page',
+  doc_chunk:        'doc chunk',
+  interaction:      'interaction',
+  insight:          'insight',
+  image:            'image',
+  video_scene:      'video scene',
+  audio_clip:       'audio clip',
+  pdf_page:         'pdf page',
+  video_transcript: 'video transcript',
+  audio_transcript: 'audio transcript',
 };
 export const KINDS_ORDER = [
   'doc_chunk', 'interaction', 'insight',
-  'image', 'video_scene', 'audio_clip', 'pdf_page',
+  'image', 'video_scene', 'video_transcript',
+  'audio_clip', 'audio_transcript', 'pdf_page',
 ];
 const kindLabel = (k) => KIND_LABELS[k] || k;
 
@@ -70,7 +75,9 @@ export function TopBar({ onQuery, query, setQuery, stats, liveEvents, onOpenSett
         <Stat label="ins" value={stats.insight} dotColor={KIND_SWATCH.insight} />
         <Stat label="img" value={stats.image} dotColor={KIND_SWATCH.image} />
         <Stat label="vid" value={stats.video_scene} dotColor={KIND_SWATCH.video_scene} />
+        <Stat label="vtx" value={stats.video_transcript} dotColor={KIND_SWATCH.video_transcript} />
         <Stat label="aud" value={stats.audio_clip} dotColor={KIND_SWATCH.audio_clip} />
+        <Stat label="atx" value={stats.audio_transcript} dotColor={KIND_SWATCH.audio_transcript} />
         <Stat label="pdf" value={stats.pdf_page} dotColor={KIND_SWATCH.pdf_page} />
         <div className="live-badge">
           <span className={'live-dot ' + (liveEvents ? 'on' : 'off')} />
