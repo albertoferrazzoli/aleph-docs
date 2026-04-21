@@ -207,8 +207,19 @@ async def fetch_pending_memories(known_ids: set, limit: int = 500) -> list:
     invisible after a page reload (snapshot is stale). With this, /graph
     returns them in a `pending` field and the frontend places them at the
     centroid of their anchor neighbors (same logic as the live SSE path).
+
+    Scaling guard: the per-pending KNN anchor lookup passes `known_ids`
+    as a SQL array, so its cost grows O(N_pending x N_known). Above a
+    few thousand nodes this freezes the /graph endpoint. When the
+    snapshot is already big we skip anchor enrichment and just return
+    empty — the next projection rebuild will include the new rows.
     """
     if not known_ids:
+        return []
+    # Heuristic cap: below this, enrichment runs in under a second.
+    # Above it, the delta is better left to the next projection sweep.
+    _MAX_KNOWN_FOR_ENRICHMENT = 2500
+    if len(known_ids) > _MAX_KNOWN_FOR_ENRICHMENT:
         return []
     async with _mem_db.get_conn() as conn:
         async with conn.cursor() as cur:
