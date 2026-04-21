@@ -126,7 +126,6 @@ export async function setActiveWorkspace(name, reindex = false) {
   return req('/workspaces/active', {
     method: 'POST',
     body: { name, reindex },
-    write: true,
   });
 }
 

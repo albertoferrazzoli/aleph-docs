@@ -531,9 +531,15 @@ async def get_workspaces() -> JSONResponse:
         raise HTTPException(500, f"workspaces listing failed: {e}")
 
 
-@app.post("/workspaces/active", dependencies=[Depends(require_api_key)])
+@app.post("/workspaces/active")
 async def set_active_workspace(body: SwitchWorkspaceBody) -> JSONResponse:
     """Switch the active workspace in-process + persist the choice.
+
+    NOT gated by X-Aleph-Key: switching is a view-layer action (it
+    swaps which DB is active, not the data itself), and basic-auth on
+    the perimeter already authenticates the user. Gating it as a
+    "write" endpoint made the viewer logout users without a configured
+    write key every time they changed workspace.
 
     Rewrites env, swaps the pool against the target DB, resets the
     embedder cache. The state file is the source of truth for both
