@@ -40,6 +40,15 @@ export const KINDS_ORDER = [
   'image', 'video_scene', 'video_transcript',
   'audio_clip', 'audio_transcript', 'pdf_page',
 ];
+
+// Groups for the sidebar filter. Lives here (not in App.jsx) because
+// LeftRail owns the collapse UI — App only cares about the flat Set.
+export const KIND_GROUPS = [
+  { title: 'text',        kinds: ['doc_chunk', 'insight', 'interaction'] },
+  { title: 'media',       kinds: ['image', 'video_scene', 'audio_clip', 'pdf_page'] },
+  { title: 'transcripts', kinds: ['video_transcript', 'audio_transcript'] },
+];
+
 const kindLabel = (k) => KIND_LABELS[k] || k;
 
 export function TopBar({ onQuery, query, setQuery, stats, liveEvents, onOpenSettings }) {
@@ -106,6 +115,94 @@ function Stat({ label, value, dotColor }) {
   );
 }
 
+// Grouped filter list with all/none/invert toolbar. Collapse state
+// is local (not persisted) — it's purely a UI convenience.
+function FilterKind({ filters, setFilters }) {
+  const [collapsed, setCollapsed] = useState(() => new Set());
+
+  const setAll = (checked) => {
+    setFilters({
+      ...filters,
+      kinds: new Set(checked ? KINDS_ORDER : []),
+    });
+  };
+  const invert = () => {
+    const s = new Set(KINDS_ORDER.filter((k) => !filters.kinds.has(k)));
+    setFilters({ ...filters, kinds: s });
+  };
+  const toggleGroup = (title) => {
+    const next = new Set(collapsed);
+    if (next.has(title)) next.delete(title); else next.add(title);
+    setCollapsed(next);
+  };
+  const setGroup = (kinds, enable) => {
+    const s = new Set(filters.kinds);
+    kinds.forEach((k) => { if (enable) s.add(k); else s.delete(k); });
+    setFilters({ ...filters, kinds: s });
+  };
+  const toggleKind = (k, checked) => {
+    const s = new Set(filters.kinds);
+    if (checked) s.add(k); else s.delete(k);
+    setFilters({ ...filters, kinds: s });
+  };
+
+  return (
+    <>
+      <div className="filter-actions">
+        <button onClick={() => setAll(true)}>all</button>
+        <span className="sep">·</span>
+        <button onClick={() => setAll(false)}>none</button>
+        <span className="sep">·</span>
+        <button onClick={invert}>invert</button>
+      </div>
+      {KIND_GROUPS.map((group) => {
+        const isCollapsed = collapsed.has(group.title);
+        const allOn = group.kinds.every((k) => filters.kinds.has(k));
+        const anyOn = group.kinds.some((k) => filters.kinds.has(k));
+        const state = allOn ? 'all' : (anyOn ? 'some' : 'none');
+        return (
+          <div key={group.title} className="filter-group">
+            <div className="filter-group-header">
+              <button
+                className="filter-group-toggle"
+                onClick={() => toggleGroup(group.title)}
+                aria-expanded={!isCollapsed}
+              >
+                <span className="caret">{isCollapsed ? '▸' : '▾'}</span>
+                <span>{group.title}</span>
+                <span className={`state-badge ${state}`}>
+                  {group.kinds.filter((k) => filters.kinds.has(k)).length}
+                  /{group.kinds.length}
+                </span>
+              </button>
+              {!isCollapsed && (
+                <button
+                  className="filter-group-action"
+                  onClick={() => setGroup(group.kinds, !allOn)}
+                  title={allOn ? 'hide all in group' : 'show all in group'}
+                >
+                  {allOn ? 'none' : 'all'}
+                </button>
+              )}
+            </div>
+            {!isCollapsed && group.kinds.map((k) => (
+              <label key={k} className="checkbox">
+                <input
+                  type="checkbox"
+                  checked={filters.kinds.has(k)}
+                  onChange={(e) => toggleKind(k, e.target.checked)}
+                />
+                <span className="swatch" style={{ background: KIND_SWATCH[k] }} />
+                <span>{kindLabel(k)}</span>
+              </label>
+            ))}
+          </div>
+        );
+      })}
+    </>
+  );
+}
+
 export function LeftRail({
   layout, setLayout, filters, setFilters, colorMode, setColorMode,
   sizeMode, setSizeMode, edgeCutoff, setEdgeCutoff,
@@ -128,21 +225,7 @@ export function LeftRail({
       </Section>
 
       <Section title="filter kind">
-        {KINDS_ORDER.map((k) => (
-          <label key={k} className="checkbox">
-            <input
-              type="checkbox"
-              checked={filters.kinds.has(k)}
-              onChange={(e) => {
-                const s = new Set(filters.kinds);
-                if (e.target.checked) s.add(k); else s.delete(k);
-                setFilters({ ...filters, kinds: s });
-              }}
-            />
-            <span className="swatch" style={{ background: KIND_SWATCH[k] }} />
-            <span>{kindLabel(k)}</span>
-          </label>
-        ))}
+        <FilterKind filters={filters} setFilters={setFilters} />
       </Section>
 
       <Section title="min decay score">
