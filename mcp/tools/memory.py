@@ -49,7 +49,7 @@ def _title_from_topic(text: str) -> str:
 def register(mcp):
     @mcp.tool()
     async def search(query: str, kind: str | None = None,
-                     limit: int = 10, min_score: float = 0.15) -> dict:
+                     limit: int = 10, min_score: float | None = None) -> dict:
         """The primary search tool. Semantic vector retrieval across
         EVERY indexed memory — Markdown, video transcripts, audio
         transcripts, PDF page text, images, video keyframes, PDF pages,
@@ -68,25 +68,34 @@ def register(mcp):
         row is paired with the same media_ref so you can still
         surface the clickable scene link to the user afterwards.
 
-        NOTE on min_score for cross-modal queries: text->image/video/audio
-        cosine similarities run lower (~0.2–0.45) than text->text
-        (~0.4–0.85). For mixed-modality queries keep min_score at 0.15
-        and let the ranking sort itself out; do NOT raise to 0.5 or
-        media hits will all be filtered out.
-
         Args:
             query: Natural-language query.
-            kind: Optional filter - one of:
+            kind: Optional filter — one of:
                 'doc_chunk', 'interaction', 'insight',
                 'image', 'video_scene', 'audio_clip', 'pdf_page',
                 'video_transcript', 'audio_transcript'.
+                When None (default), searches across every kind.
             limit: Max results (1-50, default 10).
-            min_score: Minimum score to include (default 0.15).
+            min_score: Minimum score to include. When None (default),
+                auto-selects: 0.05 for visual kinds (image /
+                video_scene / pdf_page), 0.15 for text kinds.
+                Cross-modal cosine values are structurally lower
+                than text-to-text — the auto-tuning prevents visual
+                hits from being silently filtered out.
         """
         try:
             limit = max(1, min(int(limit), 50))
             if kind and kind not in _ALL_KINDS:
                 return {"error": f"invalid kind: {kind}. allowed: {sorted(_ALL_KINDS)}"}
+            # Auto-select min_score based on the modality being queried.
+            # Visual kinds (image, video_scene, pdf_page) embed through
+            # the vision encoder whose text-to-image cosine scores are
+            # 3–5× lower than text-to-text; use a correspondingly
+            # lower floor. Unified search (kind=None) uses the low
+            # floor too so visual hits can reach the top-K.
+            _VISUAL_KINDS = {"image", "video_scene", "pdf_page"}
+            if min_score is None:
+                min_score = 0.05 if (kind in _VISUAL_KINDS or kind is None) else 0.15
             results = await store.search(query, kind=kind, limit=limit, min_score=min_score)
             return {"query": query, "kind": kind, "count": len(results), "results": results}
         except db.MemoryDisabled:
