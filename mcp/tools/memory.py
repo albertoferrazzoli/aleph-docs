@@ -122,16 +122,17 @@ def register(mcp):
             async with conn.cursor() as cur:
                 await cur.execute(
                     "SELECT kind::text, content, source_path, media_ref, "
-                    "       media_type, preview_b64 "
+                    "       media_type, preview_b64, metadata "
                     "FROM memories WHERE id = %s",
                     (memory_id,),
                 )
                 row = await cur.fetchone()
         if not row:
             return None, None, None
-        kind, content, sp, media_ref, media_type, preview_b64 = row
+        kind, content, sp, media_ref, media_type, preview_b64, row_metadata = row
         meta = {"kind": kind, "content": content, "source_path": sp,
-                "media_ref": media_ref, "media_type": media_type}
+                "media_ref": media_ref, "media_type": media_type,
+                "metadata": row_metadata or {}}
         if not preview_b64:
             return None, media_type, meta
         try:
@@ -242,19 +243,61 @@ def register(mcp):
     async def fetch_image(memory_id: str, full_res: bool = False):
         """Return the image of a specific memory as an Image content block.
 
-        Use after semantic_search / search_images when you want to inspect
-        one specific hit more closely.
+        Use after search / search_images when you want to inspect one
+        specific hit more closely. **When generating presentation /
+        slide / document output, ALWAYS pass full_res=True** — the
+        default thumbnail is 256×256 / ≤ 20 KB, too small for slides.
+
+        Full-res paths supported:
+          - PDF-embedded images (`media_ref` contains `#page=N&img=M`):
+            re-extracts the raster from the source PDF on demand.
+          - Video keyframes (`metadata.origin == "video_keyframe"`):
+            re-seeks the source .mp4 at `metadata.t_start_s` and
+            extracts a single native-resolution frame via ffmpeg.
+          - Standalone images: the thumbnail IS the full frame already;
+            the stored `preview_b64` is used as-is.
 
         Args:
             memory_id: UUID of the memory.
-            full_res: If true and the memory refers to an image embedded in
-                a PDF, re-extract the full-resolution raster from the PDF.
-                If false (default), return the stored thumbnail (≤ 20 KB).
+            full_res: When true, re-extract from source (PDF or video)
+                so the returned Image is native resolution. Default
+                false returns the small thumbnail (fast, cached).
         """
         try:
             data, mime, meta = await _fetch_preview(memory_id)
             if not meta:
                 return [f"error: memory {memory_id} not found"]
+            # Video-keyframe full-res path: re-seek the source video.
+            if (
+                full_res
+                and meta.get("kind") == "image"
+                and (meta.get("metadata") or {}).get("origin") == "video_keyframe"
+                and meta.get("media_ref")
+            ):
+                import re as _re, io as _io
+                from pathlib import Path as _Path
+                from memory import ffmpeg_utils as _ffu
+                # media_ref shape: /path/to/video.mp4#t=123.45
+                src = meta["media_ref"].split("#", 1)[0]
+                m = _re.search(r"#t=([\d.]+)", meta["media_ref"])
+                # Prefer the recorded t_start_s in metadata (exact),
+                # fall back to the fragment.
+                t = (meta.get("metadata") or {}).get("t_start_s")
+                if t is None and m:
+                    try:
+                        t = float(m.group(1))
+                    except ValueError:
+                        t = None
+                if t is not None and _Path(src).is_file():
+                    import tempfile as _tmp
+                    try:
+                        with _tmp.TemporaryDirectory() as td:
+                            frame_path = _Path(td) / "frame.png"
+                            _ffu.extract_frame_at(_Path(src), float(t), frame_path)
+                            data = frame_path.read_bytes()
+                            mime = "image/png"
+                    except Exception as e:
+                        log.warning("[memory] fetch_image video_keyframe re-extract failed: %s", e)
             if full_res and meta.get("kind") == "image" and meta.get("media_ref") and "#page=" in meta["media_ref"]:
                 # Re-extract from the source PDF (same logic as aleph /media endpoint).
                 import re as _re, io as _io

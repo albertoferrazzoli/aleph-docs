@@ -167,7 +167,44 @@ echo "$R" | grep -qw 'search' && ok "'search' is registered" || fail "search reg
 echo "$R" | grep -qw 'search_docs' && fail "search_docs retired" "still present" || ok "'search_docs' no longer exposed"
 
 # ------------------------------------------------------------------
-section "9. aleph viewer + graph snapshot"
+section "9. fetch_image full_res — video keyframe re-extract"
+# ------------------------------------------------------------------
+KF_ID=$(docker compose exec -T db psql -U aleph -d aleph_memory -At -c "SELECT id FROM memories WHERE kind='image' AND metadata->>'origin'='video_keyframe' LIMIT 1" 2>/dev/null | tr -d ' \r')
+if [ -n "$KF_ID" ]; then
+    OUT=$(docker compose exec -T mcp python - <<PY 2>/dev/null
+import asyncio, sys
+sys.path.insert(0, '/app/mcp')
+from memory import db
+from tools import memory as tm
+captured = {}
+class C:
+    def tool(self, *a, **kw):
+        def d(f):
+            captured[f.__name__]=f; return f
+        return d
+tm.register(C())
+async def go():
+    await db.init_pool()
+    fn = captured['fetch_image']
+    thumb = await fn('$KF_ID', full_res=False)
+    full  = await fn('$KF_ID', full_res=True)
+    t = next((len(i.data) for i in thumb if hasattr(i,'data')), 0)
+    f = next((len(i.data) for i in full if hasattr(i,'data')), 0)
+    print(f"{t} {f}")
+asyncio.run(go())
+PY
+)
+    T=$(echo "$OUT" | awk '{print $1}')
+    F=$(echo "$OUT" | awk '{print $2}')
+    echo "  thumbnail=$T bytes   full_res=$F bytes"
+    [ "${T:-0}" -gt 0 ] && [ "${T:-0}" -lt 30000 ] && ok "thumbnail returns ${T}B (≤30KB as expected)" || fail "thumbnail size" "$T"
+    [ "${F:-0}" -gt 100000 ] && ok "full_res returns ${F}B (>100KB, re-extracted from video)" || fail "full_res size" "$F too small — re-extract failed?"
+else
+    fail "find keyframe for full_res test" "no video_keyframe in DB"
+fi
+
+# ------------------------------------------------------------------
+section "10. aleph viewer + graph snapshot"
 # ------------------------------------------------------------------
 SN=$(docker compose exec -T db psql -U aleph -d aleph_memory -At -F' ' -c "SELECT version, jsonb_array_length(payload->'nodes') FROM graph_snapshot ORDER BY version DESC LIMIT 1" 2>/dev/null | tr -d '\r')
 V=$(echo "$SN" | awk '{print $1}')

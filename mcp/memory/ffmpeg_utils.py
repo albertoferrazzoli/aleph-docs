@@ -299,6 +299,35 @@ def segment_audio(
     return segments
 
 
+def extract_frame_at(
+    path: Path,
+    t_s: float,
+    out_path: Path,
+) -> Path:
+    """Extract a single full-resolution frame at timestamp ``t_s``.
+
+    Uses ``-ss <t> -i <path> -vframes 1`` for fast keyframe-based seek;
+    the output PNG preserves the source video's native resolution.
+    """
+    check_ffmpeg()
+    if t_s < 0:
+        raise ValueError(f"extract_frame_at: t_s must be >= 0 (got {t_s})")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        "ffmpeg",
+        "-hide_banner",
+        "-nostdin",
+        "-y",
+        "-ss", f"{t_s:.3f}",
+        "-i", str(path),
+        "-vframes", "1",
+        "-q:v", "2",
+        str(out_path),
+    ]
+    _run(cmd)
+    return out_path
+
+
 __all__ = [
     "FFmpegMissing",
     "VIDEO_SEGMENT_MAX_S",
@@ -307,5 +336,6 @@ __all__ = [
     "probe",
     "extract_keyframes",
     "extract_video_segment",
+    "extract_frame_at",
     "segment_audio",
 ]
