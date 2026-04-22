@@ -11,6 +11,7 @@ from fastmcp.utilities.types import Image
 
 from helpers import error_response
 from memory import db, store
+from memory.reinforce import record_interaction
 from memory import media as _media
 from memory.media_router import MEDIA_ROUTES as _MEDIA_ROUTES, route_media as _route_media
 from memory.types import MediaChunk
@@ -48,6 +49,7 @@ def _title_from_topic(text: str) -> str:
 
 def register(mcp):
     @mcp.tool()
+    @record_interaction("search")
     async def search(query: str, kind: str | None = None,
                      limit: int = 10, min_score: float | None = None) -> dict:
         """The primary search tool. Semantic vector retrieval across
@@ -142,6 +144,7 @@ def register(mcp):
         return data, media_type or "image/jpeg", meta
 
     @mcp.tool(output_schema=None)
+    @record_interaction("search_images")
     async def search_images(query: str, limit: int = 8,
                             min_score: float = 0.15):
         """Search for visual chunks (images, PDF pages, video scenes).
@@ -563,6 +566,7 @@ def register(mcp):
             return error_response(e)
 
     @mcp.tool()
+    @record_interaction("recall")
     async def recall(query: str, limit: int = 10) -> dict:
         """Search only your accumulated insights + past interactions.
 
