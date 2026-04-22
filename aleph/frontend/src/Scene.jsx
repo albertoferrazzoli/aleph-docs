@@ -155,6 +155,19 @@ export default function Scene(props) {
       cam.lastX = e.clientX; cam.lastY = e.clientY;
       cam.moved = 0;
     }
+    function pickInstanceId() {
+      // Raycast against both the bright core and the translucent halo
+      // so the clickable hitbox matches the visible halo extent, not
+      // just the tiny core. Halo and core share the same instanceId →
+      // the same node pops in either case.
+      const coreHits = raycaster.intersectObject(nodesMesh);
+      const haloHits = raycaster.intersectObject(halosMesh);
+      const hits = coreHits.concat(haloHits);
+      if (!hits.length) return null;
+      hits.sort((a, b) => a.distance - b.distance);
+      return hits[0].instanceId;
+    }
+
     function onUp(e) {
       if (cam.isDrag && cam.moved < 4) {
         const rect = dom.getBoundingClientRect();
@@ -162,10 +175,9 @@ export default function Scene(props) {
         mouseNDC.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
         raycaster.setFromCamera(mouseNDC, camera);
         raycaster.params.Points = { threshold: 1 };
-        const hits = raycaster.intersectObject(nodesMesh);
+        const idx = pickInstanceId();
         const cur = stateRef.current.propsRef.current;
-        if (hits.length > 0) {
-          const idx = hits[0].instanceId;
+        if (idx !== null && idx !== undefined) {
           const node = cur.nodes[idx];
           if (node) cur.onClick(node.id);
         } else {
@@ -193,9 +205,9 @@ export default function Scene(props) {
         mouseNDC.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
         mouseNDC.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
         raycaster.setFromCamera(mouseNDC, camera);
-        const hits = raycaster.intersectObject(nodesMesh);
+        const idx = pickInstanceId();
         const cur = stateRef.current.propsRef.current;
-        const id = hits.length > 0 ? cur.nodes[hits[0].instanceId]?.id : null;
+        const id = idx !== null && idx !== undefined ? cur.nodes[idx]?.id : null;
         if (id !== stateRef.current.hoveredId) {
           stateRef.current.hoveredId = id;
           cur.onHover(id);
