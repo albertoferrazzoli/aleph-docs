@@ -368,7 +368,7 @@ in [`workspaces.yaml.example`](workspaces.yaml.example):
 
 ```yaml
 - name: trading_course
-  docs_path: /docs                 # path INSIDE the mcp container
+  docs_path: /docs/trading         # path INSIDE the mcp container
   backend: nomic_multimodal_local  # EMBED_BACKEND name
   dim: 768                         # must match the backend's native dim
   pg_db: aleph_memory              # Postgres database on the shared server
@@ -383,7 +383,74 @@ in [`workspaces.yaml.example`](workspaces.yaml.example):
   local_embed_dim: 1024            # only when backend=local (Ollama)
 ```
 
-When you switch workspaces:
+### Per-workspace embedder choice
+
+Each workspace picks its own embedder, so one deployment can mix a
+cheap text-only corpus with a zero-cost multimodal one. Pick the
+backend per entry from the table below, then set `dim` to match.
+
+| `backend` | Modalities | `dim` | `local_embed_dim`? | Requirement |
+|---|---|---:|---|---|
+| `gemini-001` | text | 1536 | — | `GOOGLE_API_KEY` set |
+| `gemini-2-preview` | text + image + video + audio + pdf | 3072 | — | `GOOGLE_API_KEY` set |
+| `local` (Ollama + `bge-m3`) | text | 1024 | `1024` | [Ollama](https://ollama.com) on host with `ollama pull bge-m3` |
+| `local` (Ollama + `nomic-embed-text`) | text | 768 | `768` | `ollama pull nomic-embed-text` |
+| `local` (Ollama + `mxbai-embed-large`) | text | 1024 | `1024` | `ollama pull mxbai-embed-large` |
+| `nomic_multimodal_local` | text + image | 768 | — | Host-side FastAPI server — [`docs/EMBED_NOMIC_SETUP.md`](docs/EMBED_NOMIC_SETUP.md) |
+
+**Rules when choosing a backend**:
+
+1. `dim` MUST equal the backend's native output dimension — MRL truncation is not exposed (matches the single-workspace behaviour). Get it wrong and the first embed call raises `BackendError: dim mismatch`.
+2. Each workspace needs its OWN `pg_db`. The pgvector `embedding` column is typed `vector(N)` at `CREATE TABLE` time; two workspaces with different `dim` cannot share a database.
+3. `hybrid: true` only makes sense when the chosen backend embeds images/video/audio/pdf as media blobs. For text-only backends (`gemini-001`, `local`) set `hybrid: false` so the pipeline emits `video_transcript` / `audio_transcript` / `pdf_text` rows instead of failing on `video_scene` / `audio_clip` / `pdf_page` kinds.
+4. `local_embed_dim` is only consumed by the Ollama `local` backend. The number MUST match the output dim of whichever model `OLLAMA_MODEL` points at (see the Ollama row, one entry per supported model). Omit for every other backend.
+
+### Example — three workspaces with three different models
+
+```yaml
+# Course videos — multimodal, zero recurring cost
+- name: trading_course
+  docs_path: /docs/trading
+  backend: nomic_multimodal_local
+  dim: 768
+  pg_db: aleph_trading
+  hybrid: true
+
+# Company markdown — multilingual Ollama embedder, 100% offline
+- name: company_docs
+  docs_path: /docs/acme
+  backend: local
+  dim: 1024
+  pg_db: aleph_acme
+  hybrid: false
+  local_embed_dim: 1024
+
+# Customer-facing API docs — Gemini cloud for polished quality
+- name: api_docs
+  docs_path: /docs/api
+  backend: gemini-001
+  dim: 1536
+  pg_db: aleph_api
+  hybrid: false
+```
+
+Switching from the viewer dropdown or `switch_workspace` auto-creates
+any missing DB and ingests the new docs root in the background. Switching back to a previously-used workspace is instant.
+
+### Changing a workspace's backend after ingest
+
+You can edit `backend` + `dim` in `workspaces.yaml`, but the existing
+`pg_db` still has `vector(N)` with the old dimension. To migrate:
+
+1. Rename the workspace (or set a new `pg_db` name) in `workspaces.yaml`.
+2. Switch to the renamed workspace — a fresh DB is created with the new `dim` and the corpus reingests from `docs_path`.
+3. When the new workspace is validated, drop the old `pg_db` manually via `docker compose exec db psql -U aleph -d postgres -c 'DROP DATABASE aleph_old_name'`.
+
+In-place re-embedding across dimensions is not supported — the
+safest path is "new DB, reingest, drop old".
+
+### What happens on switch
+
 1. Target Postgres DB is created on demand if missing; the schema is
    loaded with the correct `vector(N)` dim.
 2. The MCP's connection pool is closed and re-opened against the new
