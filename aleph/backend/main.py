@@ -27,7 +27,8 @@ from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 
 from . import db, mcp_bridge
-from .auth import require_api_key
+from .auth import require_api_key, require_session
+from .auth_routes import router as auth_router
 
 log = logging.getLogger("aleph")
 
@@ -64,6 +65,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="Aleph backend", version="0.1.0", lifespan=lifespan)
+app.include_router(auth_router)
 
 
 # ---------------------------------------------------------------------------
@@ -127,7 +129,7 @@ async def health() -> JSONResponse:
 # Graph
 # ---------------------------------------------------------------------------
 
-@app.get("/graph")
+@app.get("/graph", dependencies=[Depends(require_session)])
 async def get_graph(version: Optional[int] = Query(default=None)) -> JSONResponse:
     try:
         snap = await db.get_latest_snapshot()
@@ -177,7 +179,7 @@ async def get_graph(version: Optional[int] = Query(default=None)) -> JSONRespons
 # Graph SSE stream
 # ---------------------------------------------------------------------------
 
-@app.get("/graph/stream")
+@app.get("/graph/stream", dependencies=[Depends(require_session)])
 async def graph_stream(request: Request):
     async def event_gen():
         import psycopg
@@ -261,7 +263,7 @@ async def graph_stream(request: Request):
 # Search
 # ---------------------------------------------------------------------------
 
-@app.post("/search")
+@app.post("/search", dependencies=[Depends(require_session)])
 async def search(body: SearchBody) -> JSONResponse:
     try:
         results = await mcp_bridge.search(
@@ -286,7 +288,7 @@ async def search(body: SearchBody) -> JSONResponse:
 # Node detail
 # ---------------------------------------------------------------------------
 
-@app.get("/node/{node_id}")
+@app.get("/node/{node_id}", dependencies=[Depends(require_session)])
 async def get_node(node_id: str) -> JSONResponse:
     try:
         detail = await mcp_bridge.node_detail(node_id)
@@ -298,7 +300,7 @@ async def get_node(node_id: str) -> JSONResponse:
     return JSONResponse(detail)
 
 
-@app.get("/node/{node_id}/audit")
+@app.get("/node/{node_id}/audit", dependencies=[Depends(require_session)])
 async def get_node_audit(node_id: str, limit: int = 20) -> JSONResponse:
     """Return the audit trail for a specific memory id."""
     try:
@@ -368,7 +370,7 @@ def _resolve_media_path(media_ref: str) -> Path | None:
         return None
 
 
-@app.get("/preview/{memory_id}")
+@app.get("/preview/{memory_id}", dependencies=[Depends(require_session)])
 async def get_preview(memory_id: str) -> "Response":
     """Return the stored preview thumbnail (JPEG) for a memory.
 
@@ -400,13 +402,13 @@ async def get_preview(memory_id: str) -> "Response":
     )
 
 
-@app.get("/media/{memory_id}")
+@app.get("/media/{memory_id}", dependencies=[Depends(require_session)])
 async def get_media(memory_id: str, request: Request) -> FileResponse:
     """Stream raw media bytes referenced by a memory row.
 
-    Auth: relies on Apache-level Basic Auth in production; no extra
-    X-Aleph-Key is required (media is read-only and the viewer needs to
-    fetch it from an <img>/<video> tag that can't set custom headers).
+    Auth: gated by `require_session` — the browser carries the session
+    cookie automatically on <img>/<video> requests, so media loads
+    without extra work on the client side.
 
     Path safety: the on-disk path must resolve under MEDIA_ROOT (env,
     defaults to /opt/aleph-docs/docs) or under /tmp/. Traversal attempts
@@ -529,7 +531,7 @@ class SwitchWorkspaceBody(BaseModel):
     reindex: bool = True
 
 
-@app.get("/workspaces")
+@app.get("/workspaces", dependencies=[Depends(require_session)])
 async def get_workspaces() -> JSONResponse:
     """List configured workspaces and mark the active one."""
     try:
@@ -543,7 +545,7 @@ async def get_workspaces() -> JSONResponse:
         raise HTTPException(500, f"workspaces listing failed: {e}")
 
 
-@app.post("/workspaces/active")
+@app.post("/workspaces/active", dependencies=[Depends(require_session)])
 async def set_active_workspace(body: SwitchWorkspaceBody) -> JSONResponse:
     """Switch the active workspace in-process + persist the choice.
 
@@ -577,7 +579,7 @@ async def set_active_workspace(body: SwitchWorkspaceBody) -> JSONResponse:
         raise HTTPException(500, f"workspace switch failed: {e}")
 
 
-@app.post("/remember", dependencies=[Depends(require_api_key)])
+@app.post("/remember", dependencies=[Depends(require_session), Depends(require_api_key)])
 async def remember(body: RememberBody) -> JSONResponse:
     try:
         out = await mcp_bridge.remember(
@@ -590,7 +592,7 @@ async def remember(body: RememberBody) -> JSONResponse:
         return JSONResponse({"error": str(e)}, status_code=200)
 
 
-@app.post("/forget/{node_id}", dependencies=[Depends(require_api_key)])
+@app.post("/forget/{node_id}", dependencies=[Depends(require_session), Depends(require_api_key)])
 async def forget(node_id: str) -> JSONResponse:
     try:
         out = await mcp_bridge.forget(node_id)

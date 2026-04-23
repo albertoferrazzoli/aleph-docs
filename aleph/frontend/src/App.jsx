@@ -6,15 +6,13 @@ import {
 import { useAlephStore } from './store.js';
 import {
   fetchGraph, searchGraph, remember as apiRemember, forget as apiForget,
-  openStream, getWriteKey, setWriteKey, getBasicAuth, clearAuth, redirectToLogin,
+  openStream, getWriteKey, setWriteKey, clearAuth, redirectToLogin,
   fetchNodeAudit, fetchNode, fetchWorkspaces, setActiveWorkspace,
 } from './api.js';
 
-// Hard auth guard: if there's no stored Basic Auth blob, bounce to the
-// login page BEFORE the component even mounts (avoids a flash of empty UI).
-if (typeof window !== 'undefined' && !getBasicAuth()) {
-  redirectToLogin();
-}
+// The session cookie is HttpOnly so JS can't inspect it — we rely on
+// the first API call to 401 and trigger a redirect via api.js. Brief
+// flash of empty UI is acceptable and dwarfed by the network round-trip.
 
 const TWEAK_DEFAULTS = {
   mood: 'cosmic',

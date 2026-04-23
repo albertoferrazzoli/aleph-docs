@@ -1,25 +1,24 @@
 // Thin fetch wrapper around the Aleph FastAPI backend.
-// Authentication: the user logs in via ./login.html which stores a
-// base64(user:pass) blob in localStorage under `aleph.basic_auth`. We
-// add it to every request as `Authorization: Basic <b64>`. On a 401
-// from the backend we clear the stored creds and bounce back to login.
-// Write endpoints additionally require `X-Aleph-Key` (see login form).
+// Authentication: the user logs in via ./login.html which posts to
+// POST /auth/login. The backend replies with a Set-Cookie for an
+// HttpOnly session cookie — fetch/EventSource carry it automatically
+// when `credentials: 'include'` / `withCredentials: true` is set.
+// On a 401 we redirect back to the login page.
+//
+// We intentionally no longer read any auth material from localStorage
+// for READ paths — the cookie is the source of truth. Write endpoints
+// still need an X-Aleph-Key header, which IS kept in localStorage
+// because it's orthogonal to the session (a human might have a
+// session but not the write key).
 
 const BASE = '/aleph/api';
-const BASIC_STORAGE = 'aleph.basic_auth';
 const WRITE_KEY_STORAGE = 'aleph.write_key';
-
-export function getBasicAuth() {
-  try {
-    return localStorage.getItem(BASIC_STORAGE) || '';
-  } catch {
-    return '';
-  }
-}
+// Legacy key left readable for migration; never written anymore.
+const LEGACY_BASIC_STORAGE = 'aleph.basic_auth';
 
 export function clearAuth() {
   try {
-    localStorage.removeItem(BASIC_STORAGE);
+    localStorage.removeItem(LEGACY_BASIC_STORAGE);
     localStorage.removeItem(WRITE_KEY_STORAGE);
   } catch {
     /* ignore */
@@ -47,11 +46,22 @@ export function setWriteKey(key) {
   }
 }
 
+export async function logout() {
+  try {
+    await fetch(BASE + '/auth/logout', {
+      method: 'POST',
+      credentials: 'include',
+    });
+  } catch {
+    /* ignore — the cookie Max-Age will expire it anyway */
+  }
+  clearAuth();
+  redirectToLogin();
+}
+
 async function req(path, { method = 'GET', body, write = false } = {}) {
   const headers = { Accept: 'application/json' };
   if (body !== undefined) headers['Content-Type'] = 'application/json';
-  const basic = getBasicAuth();
-  if (basic) headers['Authorization'] = 'Basic ' + basic;
   if (write) {
     const k = getWriteKey();
     if (k) headers['X-Aleph-Key'] = k;
