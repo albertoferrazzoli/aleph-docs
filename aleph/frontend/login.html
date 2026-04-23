@@ -250,31 +250,39 @@
   const toggle  = document.getElementById('toggleAdvanced');
   const adv     = document.getElementById('advancedFields');
 
-  const BASIC_KEY = 'aleph.basic_auth';
   const WRITE_KEY = 'aleph.write_key';
+  const LEGACY_BASIC_KEY = 'aleph.basic_auth';
 
   toggle.addEventListener('click', () => {
     adv.classList.toggle('show');
     toggle.textContent = adv.classList.contains('show') ? '− advanced (write key)' : '+ advanced (write key)';
   });
 
-  clearLn.addEventListener('click', (e) => {
+  clearLn.addEventListener('click', async (e) => {
     e.preventDefault();
     try {
-      localStorage.removeItem(BASIC_KEY);
+      localStorage.removeItem(LEGACY_BASIC_KEY);
       localStorage.removeItem(WRITE_KEY);
     } catch { /* ignore */ }
+    // Also ask the server to revoke the session cookie, if one exists.
+    try {
+      await fetch('/aleph/api/auth/logout', {
+        method: 'POST', credentials: 'include',
+      });
+    } catch { /* ignore — cookie may not exist */ }
     error.textContent = 'stored session cleared';
     error.classList.add('show');
     error.style.color = 'oklch(0.75 0.15 285)';
   });
 
-  // If already authenticated, bounce to main app (but let the user override with ?force=1).
+  // If already authenticated (cookie valid), bounce to main app.
+  // ?force=1 suppresses the auto-bounce for manual re-login.
   try {
-    const existing = localStorage.getItem(BASIC_KEY);
     const params = new URLSearchParams(window.location.search);
-    if (existing && !params.has('force')) {
-      window.location.replace('./');
+    if (!params.has('force')) {
+      fetch('/aleph/api/auth/me', { credentials: 'include' })
+        .then((r) => { if (r.ok) window.location.replace('./'); })
+        .catch(() => { /* offline — just show the form */ });
     }
   } catch { /* ignore */ }
 
@@ -285,11 +293,13 @@
   }
 
   async function authenticate(username, password) {
-    const b64 = btoa(unescape(encodeURIComponent(username + ':' + password)));
-    const res = await fetch('/aleph/api/health', {
-      headers: { Authorization: 'Basic ' + b64, Accept: 'application/json' },
+    const res = await fetch('/aleph/api/auth/login', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      body: JSON.stringify({ username, password }),
     });
-    if (res.status === 200) return { ok: true, b64 };
+    if (res.status === 200) return { ok: true };
     if (res.status === 401) return { ok: false, reason: 'invalid credentials' };
     return { ok: false, reason: 'server error (' + res.status + ')' };
   }
@@ -310,16 +320,11 @@
       const res = await authenticate(username, password);
       if (res.ok) {
         try {
-          localStorage.setItem(BASIC_KEY, res.b64);
           if (writekey) localStorage.setItem(WRITE_KEY, writekey);
           else localStorage.removeItem(WRITE_KEY);
+          // Legacy cleanup: older builds stored a Basic-Auth blob here.
+          localStorage.removeItem(LEGACY_BASIC_KEY);
         } catch { /* ignore */ }
-        // Prime the browser's Basic-Auth cache with one more request so
-        // EventSource (which can't set custom headers) inherits creds.
-        await fetch('/aleph/api/graph?version=0', {
-          headers: { Authorization: 'Basic ' + res.b64 },
-          credentials: 'include',
-        }).catch(() => { /* non-fatal */ });
         window.location.replace('./');
       } else {
         showError(res.reason || 'authentication failed');
