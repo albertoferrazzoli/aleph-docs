@@ -25,7 +25,9 @@ FRONTEND_LOCAL="$DEPLOY_DIR/frontend"
 SYSTEMD_LOCAL="$DEPLOY_DIR/systemd"
 
 APACHE_CONF="${APACHE_CONF:-/etc/apache2/sites-enabled/000-default.conf}"
-HTPASSWD_FILE="/etc/apache2/aleph.htpasswd"
+# The htpasswd file now lives with the app (read by the backend via
+# ALEPH_HTPASSWD_FILE env var). Apache is no longer in the auth loop.
+HTPASSWD_FILE="${ALEPH_REMOTE_PATH}/data/htpasswd"
 
 RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[1;33m'; NC='\033[0m'
 log()   { echo -e "${GREEN}[aleph]${NC} $1"; }
@@ -317,9 +319,14 @@ gcloud compute ssh "$PROD_VM" --zone="$PROD_ZONE" --project="$PROD_PROJECT" --co
         fi
     }
 
-    upsert_env ALEPH_API_KEY   '$ALEPH_API_KEY_VAL'
-    upsert_env MEMORY_ENABLED  'true'
-    upsert_env MCP_PATH        '$MCP_REMOTE_PATH'
+    upsert_env ALEPH_API_KEY              '$ALEPH_API_KEY_VAL'
+    upsert_env ALEPH_HTPASSWD_FILE        '$HTPASSWD_FILE'
+    upsert_env ALEPH_SESSIONS_DB          '$ALEPH_REMOTE_PATH/data/sessions.db'
+    upsert_env ALEPH_SESSION_TTL_HOURS    '24'
+    upsert_env ALEPH_COOKIE_SECURE        '1'
+    upsert_env ALEPH_COOKIE_PATH          '/aleph'
+    upsert_env MEMORY_ENABLED             'true'
+    upsert_env MCP_PATH                   '$MCP_REMOTE_PATH'
     # EMBED_BACKEND must match the backend used by the MCP indexer —
     # query vectors and stored vectors must live in the same latent space.
     # Default to gemini-2-preview (multimodal); override via env if the MCP
@@ -347,12 +354,14 @@ gcloud compute ssh "$PROD_VM" --zone="$PROD_ZONE" --project="$PROD_PROJECT" --co
 "
 
 # ---------------------------------------------------------------------------
-echo "--- [8/9] Apache: /aleph alias + SPA fallback + reverse proxy + Basic Auth"
+echo "--- [8/9] Apache: /aleph alias + SPA fallback + reverse proxy"
 # ---------------------------------------------------------------------------
+# Note: auth is now enforced inside the backend (see backend/auth.py).
+# Apache does pure reverse-proxying; the only reason we still touch the
+# htpasswd file here is to SEED it on first deploy so the operator has a
+# working login without shelling into the VM.
 if [ "$SKIP_APACHE" = false ]; then
     log "Updating Apache config (idempotent, with backup + configtest)..."
-    # Escape single quotes in the htpasswd password for safe transport in double-quoted
-    # remote command. We pass it via the env-assigned var read below.
     gcloud compute ssh "$PROD_VM" --zone="$PROD_ZONE" --project="$PROD_PROJECT" --command="
         set -euo pipefail
         CONF=$APACHE_CONF
@@ -362,18 +371,25 @@ if [ "$SKIP_APACHE" = false ]; then
 
         [ -f \"\$CONF\" ] || { echo \"[deploy] ERROR: \$CONF not found\"; exit 1; }
 
-        # Ensure required modules are enabled (idempotent; a2enmod returns 0 if already enabled)
-        sudo a2enmod proxy proxy_http headers rewrite auth_basic authn_file >/dev/null
+        # Ensure required Apache modules (auth_basic / authn_file no
+        # longer required — auth runs inside the app).
+        sudo a2enmod proxy proxy_http headers rewrite >/dev/null
 
-        # Ensure htpasswd tool
+        # Ensure htpasswd tool (used to seed the initial admin account)
         if ! command -v htpasswd >/dev/null 2>&1; then
             sudo DEBIAN_FRONTEND=noninteractive apt-get install -y apache2-utils >/dev/null
         fi
 
-        # Create / refresh htpasswd file (always rewrite to match supplied creds)
-        printf '%s' \"\$HTP\" | sudo htpasswd -ciB \"\$HTPASSWD\" \"\$HTU\" >/dev/null
-        sudo chown root:www-data \"\$HTPASSWD\"
-        sudo chmod 0640 \"\$HTPASSWD\"
+        # Seed the app-owned htpasswd. We only rewrite when the file is
+        # MISSING or the operator supplied credentials — never clobber a
+        # file that's been edited by hand on the VM.
+        sudo mkdir -p \"\$(dirname \"\$HTPASSWD\")\"
+        if [ ! -s \"\$HTPASSWD\" ] && [ -n \"\$HTU\" ] && [ -n \"\$HTP\" ]; then
+            printf '%s' \"\$HTP\" | sudo htpasswd -ciB \"\$HTPASSWD\" \"\$HTU\" >/dev/null
+            echo \"[deploy] htpasswd seeded for user '\$HTU' at \$HTPASSWD\"
+        fi
+        sudo chown www-data:www-data \"\$HTPASSWD\" 2>/dev/null || true
+        sudo chmod 0640 \"\$HTPASSWD\" 2>/dev/null || true
 
         # Backup before any edit
         TS=\$(date +%Y%m%d-%H%M%S)
@@ -397,15 +413,9 @@ if [ "$SKIP_APACHE" = false ]; then
         RewriteCond %{REQUEST_URI} !^/aleph/api
         RewriteRule . /aleph/index.html [L]
     </Directory>
-    # Auth gates the API (and therefore every useful action). The frontend
-    # static files under /aleph/* are intentionally public so the custom
-    # login page (login.html) can be served without a browser popup.
-    <Location /aleph/api>
-        AuthType Basic
-        AuthName \"Aleph\"
-        AuthUserFile /etc/apache2/aleph.htpasswd
-        Require valid-user
-    </Location>
+    # No Apache-level auth: the backend gates /aleph/api via session
+    # cookies + bearer tokens (see backend/auth.py). Login page at
+    # /aleph/login.html remains public so the user can obtain a session.
     # SSE: no buffering, long timeout (must come BEFORE the general /aleph/api ProxyPass)
     <Location /aleph/api/graph/stream>
         ProxyPass http://127.0.0.1:8765/graph/stream flushpackets=on keepalive=On timeout=86400
@@ -499,9 +509,11 @@ gcloud compute ssh "$PROD_VM" --zone="$PROD_ZONE" --project="$PROD_PROJECT" --co
 # ---------------------------------------------------------------------------
 echo ""
 log "Deploy complete."
-echo "  URL (public, requires Basic Auth): https://example.com/aleph/"
-echo "  Health (internal, on VM):          sudo -u www-data curl -sS http://127.0.0.1:8765/health"
+echo "  URL (login at /aleph/login.html): https://example.com/aleph/"
+echo "  Health (internal, on VM):         sudo -u www-data curl -sS http://127.0.0.1:8765/health"
 if [ "$SKIP_APACHE" = false ]; then
-    echo "  Health (public):                   curl -u ${HTPASSWD_USER_VAL}:<pw> https://example.com/aleph/api/health"
+    echo "  Login (public):                   curl -X POST -H 'Content-Type: application/json' \\"
+    echo "                                      -d '{\"username\":\"${HTPASSWD_USER_VAL}\",\"password\":\"<pw>\"}' \\"
+    echo "                                      https://example.com/aleph/api/auth/login"
 fi
 echo "  Logs:                              gcloud compute ssh $PROD_VM --zone=$PROD_ZONE --project=$PROD_PROJECT --command='journalctl -u aleph-backend -f'"
