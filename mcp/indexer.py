@@ -578,7 +578,15 @@ def rebuild(conn):
     )
     count = 0
     for abs_path in iter_doc_files(REPO_PATH):
-        rel = abs_path.relative_to(REPO_PATH / CONTENT_SUBDIR).as_posix()
+        # Always anchor rel_path to REPO_PATH (not REPO_PATH/CONTENT_SUBDIR).
+        # This decouples the *scan scope* (content_dir, controlled by
+        # CONTENT_SUBDIR) from the *path key* used in storage. With
+        # CONTENT_SUBDIR variants drifting between "git" and "local" modes
+        # the old pattern silently produced two different conventions
+        # (`content/X.md` vs `X.md`) for the same file, doubling the
+        # corpus on the next mode flip. Anchoring to REPO_PATH gives a
+        # stable, mode-independent key.
+        rel = abs_path.relative_to(REPO_PATH).as_posix()
         upsert_page(conn, rel, abs_path)
         count += 1
     set_meta(conn, "last_commit_hash", current_commit())

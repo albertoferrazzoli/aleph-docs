@@ -300,6 +300,20 @@ def chunk(rel_path: str, body: str, frontmatter: dict, headings: list[dict]) -> 
                     )
                 )
 
+    # Disambiguate duplicate section anchors. Markdown pages can have multiple
+    # H2/H3 headers slugifying to the same anchor (e.g. two "## Pricing"
+    # blocks on a comparison page). The (source_path, source_section) UNIQUE
+    # index in schema.sql forbids the duplicate, and upsert_doc_chunks loads
+    # `existing` only once at the start of the call, so the second INSERT
+    # crashes the whole transaction. Appending -2, -3, ... preserves both
+    # chunks without changing the schema or the upsert path.
+    seen: dict[str, int] = {}
+    for c in chunks:
+        n = seen.get(c.section_anchor, 0) + 1
+        seen[c.section_anchor] = n
+        if n > 1:
+            c.section_anchor = f"{c.section_anchor}-{n}"
+
     return chunks
 
 

@@ -294,10 +294,20 @@ export default function App() {
     return () => window.removeEventListener('pointermove', onMove);
   }, []);
 
-  // Adjusted nodes with client-side decay
+  // Adjusted nodes with client-side decay. Mirrors the server-side CASE in
+  // mcp/memory/store.py: every kind that represents an externally ingested
+  // artefact — documents, media, transcripts — is ground truth and always
+  // scores 1.0. Decay applies ONLY to the two volatile cognitive kinds
+  // (insight, interaction); they earn persistence by being accessed or by
+  // being promoted to a canonical chunk during a doc reorganisation pass.
   const adjustedNodes = useMemo(() => {
+    const CANONICAL_KINDS = new Set([
+      'doc_chunk', 'image', 'pdf_page', 'video_scene', 'audio_clip',
+      'video_transcript', 'audio_transcript', 'pdf_text',
+    ]);
     const nowShifted = Date.now() - timeShift * 86400 * 1000;
     return nodes.map((n) => {
+      if (CANONICAL_KINDS.has(n.kind)) return { ...n, decay: 1.0 };
       const dt = Math.max(0, (nowShifted - (n.lastAccessAt ?? nowShifted)) / 86400 / 1000);
       const decay = n.decay === 0 ? 0 : applyDecay(n.stability ?? 1, dt, tweaks.decayCurve);
       return { ...n, decay };

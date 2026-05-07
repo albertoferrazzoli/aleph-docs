@@ -81,9 +81,17 @@ async def _run(args) -> int:
         embeddings.reset_token_counter()
         start = time.time()
 
+        # Anchor rel_path to REPO_PATH, not content_root. content_root
+        # controls *what we scan* (typically REPO_PATH/content), but the
+        # storage key must be stable across CONTENT_SUBDIR variants
+        # ("content" vs ""). Without this, switching mode silently
+        # produces a parallel set of bare-path duplicates in the DB.
+        rel_anchor = REPO_PATH if (
+            args.content_dir is None and content_root != REPO_PATH
+        ) else content_root
         for i, abs_path in enumerate(files, 1):
             try:
-                rel = str(abs_path.relative_to(content_root))
+                rel = abs_path.relative_to(rel_anchor).as_posix()
             except ValueError:
                 rel = str(abs_path)
             try:

@@ -32,6 +32,13 @@ _DEFAULTS = {
     "interaction": 3.0,
 }
 
+# Visual / audio kinds whose embeddings live in CLIP-style cross-modal space.
+# Text-to-media cosine similarity sits in a lower band than text-to-text,
+# so a global min_score tuned for text would silently drop them.
+# Capping their floor at 0.05 keeps the semantic gate without hiding them.
+_CROSS_MODAL_KINDS = ("image", "pdf_page", "video_scene", "audio_clip")
+_CROSS_MODAL_FLOOR = 0.05
+
 
 def _stability_for(kind: str) -> float:
     env_key = f"STABILITY_{kind.upper()}"
@@ -769,39 +776,117 @@ async def search(
     emb = await embeddings.embed_one(query)
     v = _vec(emb)
 
-    where_clause = ""
-    params: list = [v]
-    if kind:
-        where_clause = "WHERE kind = %s"
-        params.append(kind)
-    params.append(v)           # ORDER BY
-    params.append(limit * 3)   # hits LIMIT
-    params.append(min_score)   # scored filter
-    params.append(limit)       # ranked LIMIT
+    # Per-kind floor: cross-modal hits use min(min_score, _CROSS_MODAL_FLOOR)
+    # so callers can still go lower (e.g. 0.0) but cannot accidentally hide
+    # all visual/audio matches by passing a text-tuned threshold.
+    cm_floor = min(min_score, _CROSS_MODAL_FLOOR)
+    cm_kinds_sql = ",".join(f"'{k}'" for k in _CROSS_MODAL_KINDS)
 
+    # Two-pool strategy. Without it the unified top-N candidate pool (ORDER
+    # BY embedding distance LIMIT N) gets saturated by text hits whose
+    # text-text cosine sits in 0.5–0.7, and visual hits — which live in a
+    # lower 0.2–0.4 cross-modal band — never make the cut. We carve out a
+    # second pool reserved to cross-modal kinds so they reach the scoring
+    # stage independently. When `kind` is pinned we collapse to a single
+    # pool because the caller has explicitly asked for one modality.
+    if kind:
+        # Single-pool mode.
+        params: list = [v, kind, v, limit * 3]
+        candidates_cte = """
+        candidates AS (
+            SELECT id, kind, content, source_path, source_section, metadata,
+                   1 - (embedding <=> %s) AS similarity,
+                   access_count, stability, last_access_at, created_at
+            FROM memories
+            WHERE kind = %s
+            ORDER BY embedding <=> %s
+            LIMIT %s
+        )
+        """
+    else:
+        # Two-pool mode: text-side pool + cross-modal pool, then UNION.
+        params = [
+            v,                # text pool SELECT
+            v, limit * 3,     # text pool ORDER BY + LIMIT
+            v,                # cm pool SELECT
+            v, max(limit, 10),# cm pool ORDER BY + LIMIT (at least 10)
+        ]
+        candidates_cte = f"""
+        candidates AS (
+            (SELECT id, kind, content, source_path, source_section, metadata,
+                    1 - (embedding <=> %s) AS similarity,
+                    access_count, stability, last_access_at, created_at
+             FROM memories
+             WHERE kind NOT IN ({cm_kinds_sql})
+             ORDER BY embedding <=> %s
+             LIMIT %s)
+            UNION ALL
+            (SELECT id, kind, content, source_path, source_section, metadata,
+                    1 - (embedding <=> %s) AS similarity,
+                    access_count, stability, last_access_at, created_at
+             FROM memories
+             WHERE kind IN ({cm_kinds_sql})
+             ORDER BY embedding <=> %s
+             LIMIT %s)
+        )
+        """
+
+    params.append(cm_floor)    # scored filter — cross-modal kinds
+    params.append(min_score)   # scored filter — everything else
+
+    # Quota reserved for cross-modal results in the final ranking. Without
+    # this the global top-N still drops images: their cross-modal scores
+    # (0.2–0.3) lose to text-text scores (0.5–0.6) on raw rank, even when
+    # both pass the floor. With the quota we guarantee a visible slice of
+    # visual hits when matches exist. When `kind` is pinned the caller is
+    # already filtered, so we collapse back to a single global top-N.
+    if kind:
+        ranked_sql = "SELECT * FROM scored ORDER BY score DESC LIMIT %s"
+        params.append(limit)
+    else:
+        cm_quota = max(2, limit // 5)
+        text_slots = limit - cm_quota
+        ranked_sql = f"""
+            SELECT * FROM (
+                (SELECT * FROM scored
+                  WHERE kind NOT IN ({cm_kinds_sql})
+                  ORDER BY score DESC LIMIT %s)
+                UNION ALL
+                (SELECT * FROM scored
+                  WHERE kind IN ({cm_kinds_sql})
+                  ORDER BY score DESC LIMIT %s)
+            ) u
+            ORDER BY score DESC
+        """
+        params.append(text_slots)
+        params.append(cm_quota)
+
+    # Canonical (ground-truth) kinds: anything that represents an externally
+    # ingested artefact (documents, media, transcripts) keeps decay = 1.0.
+    # Decay only applies to volatile cognitive kinds — insight + interaction
+    # — which earn their persistence by being either re-accessed or
+    # promoted to a canonical chunk during reorganisation.
     sql = f"""
-    WITH hits AS (
-        SELECT id, kind, content, source_path, source_section, metadata,
-               1 - (embedding <=> %s) AS similarity,
+    WITH {candidates_cte},
+    hits AS (
+        SELECT *,
                CASE
-                   WHEN kind IN ('doc_chunk','image','pdf_page','video_scene','audio_clip')
+                   WHEN kind IN ('doc_chunk','image','pdf_page','video_scene','audio_clip',
+                                 'video_transcript','audio_transcript','pdf_text')
                        THEN 1.0
                    ELSE EXP(-EXTRACT(EPOCH FROM (now() - last_access_at))
                             / 86400.0 / stability)
-               END AS decay,
-               access_count, stability, last_access_at, created_at
-        FROM memories
-        {where_clause}
-        ORDER BY embedding <=> %s
-        LIMIT %s
+               END AS decay
+        FROM candidates
     ),
     scored AS (
         SELECT *, (similarity * decay) AS score
         FROM hits
-        WHERE (similarity * decay) > %s
+        WHERE (similarity * decay) >
+              CASE WHEN kind IN ({cm_kinds_sql}) THEN %s ELSE %s END
     ),
     ranked AS (
-        SELECT * FROM scored ORDER BY score DESC LIMIT %s
+        {ranked_sql}
     ),
     updated AS (
         UPDATE memories m

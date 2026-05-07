@@ -223,9 +223,13 @@ async def activate(ws: Workspace) -> dict:
                                 )
                                 n = 0
                                 for abs_path in _indexer.iter_doc_files(_indexer.REPO_PATH):
+                                    # Stable storage key: anchor to REPO_PATH
+                                    # regardless of CONTENT_SUBDIR. Mirrors
+                                    # indexer.py rebuild path so workspace
+                                    # activation cannot produce a parallel
+                                    # bare-path duplicate set.
                                     rel = abs_path.relative_to(
-                                        _indexer.REPO_PATH / _indexer.CONTENT_SUBDIR
-                                        if _indexer.CONTENT_SUBDIR else _indexer.REPO_PATH
+                                        _indexer.REPO_PATH
                                     ).as_posix()
                                     _indexer.upsert_page(sconn, rel, abs_path)
                                     n += 1
